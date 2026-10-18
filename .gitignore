@@ -1,0 +1,8 @@
+# Reference material, not part of this repo
+Fedora-Setup-main/
+Fedora-Noble-Setup-main/
+linux-thinkpad-speaker-improvements-main/
+
+# WireGuard tunnels hold private keys — never commit them
+wireguard/
+*.conf
