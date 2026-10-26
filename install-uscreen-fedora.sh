@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # install-uscreen-fedora.sh — UScreen (Android tablet as a second monitor),
-# Linux side. Standalone: not part of fedora44-setup.sh.
+# Linux side. Standalone: not part of fedora-setup.sh.
 #
 # Safe to re-run to update: every step skips itself when already done, and a
 # new UScreen release is only downloaded when one is out.

@@ -1,0 +1,27 @@
+# fedora-setup.sh configuration — copy to fedora-setup.conf and edit.
+# Every value here is optional: the script has working defaults without it.
+# Command-line flags still win over this file.
+
+# Leave empty to keep whatever hostname the installer set.
+FEDORA_SETUP_HOSTNAME=""
+
+# Which browser to make the default the first time Helium is installed.
+# helium | none
+FEDORA_SETUP_BROWSER="helium"
+
+# GNOME touchpad pointer speed, -1.0 (slowest) .. 1.0 (fastest).
+FEDORA_SETUP_TOUCHPAD_SPEED="0.45"
+
+# Speaker profile: auto applies it only on a ThinkPad T14 Gen 1,
+# off disables it, force applies it on any machine.
+FEDORA_SETUP_AUDIO="auto"
+
+# Extra dnf packages to install on every run.
+FEDORA_SETUP_EXTRA_PACKAGES=""
+
+# Stages to skip by default (space or comma separated).
+# e.g. "vpn audio" — or run ./fedora-setup.sh --skip vpn once.
+FEDORA_SETUP_SKIP_STAGES=""
+
+# Ask "reboot now?" at the end when a new kernel is waiting: 1 | 0
+FEDORA_SETUP_REBOOT_PROMPT="1"

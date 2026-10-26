@@ -1,0 +1,31 @@
+name: lint
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: bash syntax
+        run: |
+          bash -n fedora-setup.sh
+          bash -n install-uscreen-fedora.sh
+          bash -n fedora44-setup.sh
+
+      - name: shellcheck
+        run: |
+          shellcheck --version
+          shellcheck -x --severity=warning --shell=bash \
+            fedora-setup.sh install-uscreen-fedora.sh fedora44-setup.sh
+
+      - name: no CRLF in shell scripts
+        run: |
+          if grep -rIl $'\r' --include='*.sh' .; then
+            echo "CRLF line endings found" >&2
+            exit 1
+          fi
