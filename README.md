@@ -69,8 +69,8 @@ fedora-setup --help
 ```
 
 `config` links `~/.local/bin/fedora-setup` to the script in your checkout, so
-the command works from any directory and still finds your
-`fedora-setup.conf` and `wireguard/` folder. Each run first does
+the command works from any directory and still finds your `wireguard/`
+folder. Each run first does
 `git pull --ff-only` on the checkout; disable that with `--no-self-update`.
 (`./fedora-setup.sh` inside the checkout is the same thing.)
 
@@ -78,27 +78,23 @@ Every real run is logged to `~/.local/state/fedora-setup/logs/` (last 20 kept),
 and a lock prevents two runs overlapping. Runs need your sudo password, so
 there is no cron job: just run it yourself now and then.
 
-## Configuration
+## Settings
 
-Optional. Copy the example and edit only what you care about:
+There is no config file: the few settings live at the top of
+`fedora-setup.sh`, so the script is the only file you touch.
 
-```bash
-cp fedora-setup.conf.example fedora-setup.conf
-```
-
-| Key | Default | Meaning |
+| Setting | Default | Meaning |
 | --- | --- | --- |
-| `FEDORA_SETUP_HOSTNAME` | empty | leave the hostname alone, or set one |
-| `FEDORA_SETUP_BROWSER` | `helium` | `helium` or `none` |
-| `FEDORA_SETUP_TOUCHPAD_SPEED` | `0.45` | `-1.0` .. `1.0` |
-| `FEDORA_SETUP_AUDIO` | `auto` | `auto` (T14 Gen 1 only), `off`, `force` |
-| `FEDORA_SETUP_EXTRA_PACKAGES` | empty | extra dnf packages, space separated |
-| `FEDORA_SETUP_SKIP_STAGES` | empty | stages to skip, e.g. `vpn audio` or `vpn,audio` |
-| `FEDORA_SETUP_REBOOT_PROMPT` | `1` | ask before rebooting at the end |
+| `CFG_HOSTNAME` | empty | leave the hostname alone, or set one |
+| `CFG_BROWSER` | `helium` | `helium` or `none` |
+| `CFG_TOUCHPAD_SPEED` | `0.45` | `-1.0` .. `1.0` |
+| `CFG_AUDIO` | `auto` | `auto` (T14 Gen 1 only), `off`, `force` |
+| `CFG_EXTRA_PACKAGES` | empty | extra dnf packages, space separated |
+| `REBOOT_PROMPT` | `1` | ask before rebooting at the end |
 
-`fedora-setup.conf` is git-ignored, so it survives self-updates and a
-personal copy never lands in the repo. Any key can also be set as an
-environment variable for a single run.
+Edit them in this repo and push: every machine picks the change up on its
+next run through the self-update. Local edits on the laptop itself make
+`git pull` refuse, and the script then warns and runs the copy it has.
 
 ## WireGuard
 

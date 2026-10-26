@@ -4,8 +4,5 @@ Fedora-Noble-Setup-main/
 linux-thinkpad-speaker-improvements-main/
 .build/
 
-# Personal config — copy fedora-setup.conf.example to fedora-setup.conf
-fedora-setup.conf
-
 # WireGuard tunnels hold private keys — never commit them
 wireguard/

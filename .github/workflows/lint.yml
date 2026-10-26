@@ -15,13 +15,12 @@ jobs:
         run: |
           bash -n fedora-setup.sh
           bash -n install-uscreen-fedora.sh
-          bash -n fedora44-setup.sh
 
       - name: shellcheck
         run: |
           shellcheck --version
           shellcheck -x --severity=warning --shell=bash \
-            fedora-setup.sh install-uscreen-fedora.sh fedora44-setup.sh
+            fedora-setup.sh install-uscreen-fedora.sh
 
       - name: no CRLF in shell scripts
         run: |

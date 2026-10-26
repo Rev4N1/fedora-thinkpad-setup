@@ -48,7 +48,7 @@
 # Optional stage (not part of a full run):
 #   release    upgrade to the next Fedora release (dnf system-upgrade)
 #
-# Optional config: fedora-setup.conf next to this script (see README).
+# Settings: edit the block at the top of this script — there is no config file.
 # Logs: ~/.local/state/fedora-setup/logs/
 # WireGuard: put *.conf in wireguard/ next to this script (git-ignored).
 #
@@ -56,9 +56,19 @@
 
 set -Eeuo pipefail
 
-VERSION="3.1"
+VERSION="3.2"
 
 # ---------------------------------------------------------------- settings ---
+
+# Your settings. Edit them here: there is no separate config file.
+CFG_HOSTNAME=""              # hostname to set; empty = leave it alone
+CFG_BROWSER="helium"         # default browser on first install: helium | none
+CFG_TOUCHPAD_SPEED="0.45"    # GNOME pointer speed, -1.0 (slow) .. 1.0 (fast)
+CFG_AUDIO="auto"             # speaker profile: auto (T14 Gen 1 only) | off | force
+CFG_EXTRA_PACKAGES=""        # extra dnf packages, space separated
+REBOOT_PROMPT=1              # ask "reboot now?" when a new kernel waits: 1 | 0
+
+# ------------------------------------------------------------------ state ---
 
 DRY_RUN=0
 ASSUME_YES=0
@@ -78,7 +88,7 @@ EXTRA_STAGES=(session release)
 ALL_STAGES=("${DEFAULT_STAGES[@]}" "${EXTRA_STAGES[@]}")
 
 # Resolve the script's real path, following the ~/.local/bin/fedora-setup
-# symlink back into the checkout so the config file, wireguard/ and git
+# symlink back into the checkout so wireguard/ and git
 # self-update all work from either entry point. Under `bash <(curl ...)` or
 # `curl ... | bash` there is no file: main() then bootstraps a checkout.
 SELF_PATH=""
@@ -99,22 +109,6 @@ FIRST_RUN=1
 # Set when a stage could not do its desktop-only work (no session bus), so the
 # script can queue a one-shot autostart entry instead of asking you to do it.
 SESSION_PENDING=0
-
-# Defaults; fedora-setup.conf or the environment may override them.
-#
-#   FEDORA_SETUP_HOSTNAME       set the hostname (empty = leave it alone)
-#   FEDORA_SETUP_BROWSER        helium | none  (default: helium)
-#   FEDORA_SETUP_TOUCHPAD_SPEED GNOME pointer speed, -1.0 .. 1.0 (default: 0.45)
-#   FEDORA_SETUP_AUDIO          auto | off | force  (default: auto = T14 Gen 1 only)
-#   FEDORA_SETUP_EXTRA_PACKAGES extra dnf packages, space separated
-#   FEDORA_SETUP_SKIP_STAGES    stages to skip by default, space separated
-#   FEDORA_SETUP_REBOOT_PROMPT  1 | 0
-CFG_HOSTNAME="${FEDORA_SETUP_HOSTNAME:-}"
-CFG_BROWSER="${FEDORA_SETUP_BROWSER:-helium}"
-CFG_TOUCHPAD_SPEED="${FEDORA_SETUP_TOUCHPAD_SPEED:-0.45}"
-CFG_AUDIO="${FEDORA_SETUP_AUDIO:-auto}"
-CFG_EXTRA_PACKAGES="${FEDORA_SETUP_EXTRA_PACKAGES:-}"
-CFG_SKIP_STAGES="${FEDORA_SETUP_SKIP_STAGES:-}"
 
 # ---------------------------------------------------------------- plumbing ---
 
@@ -314,17 +308,6 @@ usage() {
   else
     printf '%s\n' "fedora-setup.sh — set up, update and maintain Fedora GNOME with one command"
   fi
-  cat <<'EOT'
-
-Configuration (optional), in fedora-setup.conf next to this script:
-  FEDORA_SETUP_HOSTNAME="my-laptop"      # empty = leave the hostname alone
-  FEDORA_SETUP_BROWSER="helium"          # helium | none
-  FEDORA_SETUP_TOUCHPAD_SPEED="0.45"     # -1.0 .. 1.0
-  FEDORA_SETUP_AUDIO="auto"              # auto | off | force
-  FEDORA_SETUP_EXTRA_PACKAGES="htop btop"
-  FEDORA_SETUP_SKIP_STAGES="vpn"
-  FEDORA_SETUP_REBOOT_PROMPT="1"
-EOT
 }
 
 valid_stage() {
@@ -368,29 +351,7 @@ while (( $# )); do
   shift
 done
 
-# Optional config file. Values in it override the environment; flags on the
-# command line still win over both.
-CONF_FILE="${FEDORA_SETUP_CONF:-$SCRIPT_DIR/fedora-setup.conf}"
-if [[ -r "$CONF_FILE" ]]; then
-  # shellcheck source=/dev/null
-  source "$CONF_FILE"
-  CFG_HOSTNAME="${FEDORA_SETUP_HOSTNAME:-$CFG_HOSTNAME}"
-  CFG_BROWSER="${FEDORA_SETUP_BROWSER:-$CFG_BROWSER}"
-  CFG_TOUCHPAD_SPEED="${FEDORA_SETUP_TOUCHPAD_SPEED:-$CFG_TOUCHPAD_SPEED}"
-  CFG_AUDIO="${FEDORA_SETUP_AUDIO:-$CFG_AUDIO}"
-  CFG_EXTRA_PACKAGES="${FEDORA_SETUP_EXTRA_PACKAGES:-$CFG_EXTRA_PACKAGES}"
-  CFG_SKIP_STAGES="${FEDORA_SETUP_SKIP_STAGES:-$CFG_SKIP_STAGES}"
-fi
-REBOOT_PROMPT="${FEDORA_SETUP_REBOOT_PROMPT:-1}"
 (( NO_REBOOT )) && REBOOT_PROMPT=0
-# Config-specified skips only add to command-line skips. Space or comma separated.
-if [[ -n "$CFG_SKIP_STAGES" ]]; then
-  read -r -a _cfg_skips <<<"${CFG_SKIP_STAGES//,/ }"
-  for _s in "${_cfg_skips[@]}"; do
-    valid_stage "$_s" || die "unknown stage in FEDORA_SETUP_SKIP_STAGES: $_s"
-    SKIP_STAGES+=("$_s")
-  done
-fi
 
 # A plain run (no stage names given) is what marks the first setup as complete,
 # even when some stages are skipped. Partial runs never do, so the one-time
@@ -541,10 +502,10 @@ trap on_err ERR
 # ------------------------------------------------------------ self-update ---
 
 # Run without a file (`bash <(curl ...)` on a fresh install): get a real
-# checkout first, then hand over to it. From then on everything — config,
+# checkout first, then hand over to it. From then on everything — the script,
 # wireguard/, self-update — lives in that one directory.
 bootstrap() {
-  local dest="${FEDORA_SETUP_DIR:-$HOME/fedora-thinkpad-setup}"
+  local dest="$HOME/fedora-thinkpad-setup"
   [[ $EUID -ne 0 ]] || die "run as your normal user, not root — the script calls sudo itself."
   step "Bootstrap"
   if (( DRY_RUN )); then
@@ -567,7 +528,7 @@ bootstrap() {
 }
 
 # ~/.local/bin/fedora-setup is a symlink into the checkout, never a copy: a
-# copy would look for its config and wireguard/ in ~/.local/bin and could not
+# copy would look for wireguard/ in ~/.local/bin and could not
 # update itself.
 install_self() {
   local dest="$INSTALLED_PATH"
@@ -637,7 +598,7 @@ stage_config() {
       run sudo hostnamectl set-hostname "$CFG_HOSTNAME"
     fi
   else
-    ok "hostname left alone (set FEDORA_SETUP_HOSTNAME to change it)"
+    ok "hostname left alone (set CFG_HOSTNAME at the top of the script to change it)"
   fi
 
   install_self
@@ -899,9 +860,9 @@ REPO
                   [[ -n $d ]] && xdg-settings set default-web-browser "$(basename "$d")"
                 fi' || true ;;
       none)
-        ok "default browser left alone (FEDORA_SETUP_BROWSER=none)" ;;
+        ok "default browser left alone (CFG_BROWSER=none)" ;;
       *)
-        warn "unknown FEDORA_SETUP_BROWSER '$CFG_BROWSER' — leaving the default browser alone" ;;
+        warn "unknown CFG_BROWSER '$CFG_BROWSER' — leaving the default browser alone" ;;
     esac
   fi
 
@@ -1156,7 +1117,7 @@ stage_audio() {
   step "8. Audio (EasyEffects + T14 Gen 1 speaker profile)"
 
   if ! audio_wanted; then
-    ok "speaker profile not applied (FEDORA_SETUP_AUDIO=$CFG_AUDIO, auto = ThinkPad T14 Gen 1 only)"
+    ok "speaker profile not applied (CFG_AUDIO=$CFG_AUDIO, auto = ThinkPad T14 Gen 1 only)"
     return 0
   fi
 
