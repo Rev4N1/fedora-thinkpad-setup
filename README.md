@@ -39,14 +39,14 @@ keeps installing security updates in between.
 | `vpn` | imports `wireguard/*.conf` into NetworkManager |
 | `gnome` | touchpad, Night Light, keyboard, battery %, extensions, Ptyxis |
 | `laptop` | tuned, TRIM, faster boot, firmware, fingerprint, ThinkPad extras |
-| `sweep` | final dnf/Flatpak/firmware pass |
+| `sweep` | final dnf/Flatpak/firmware pass, plus updates for extensions installed from extensions.gnome.org |
 | `health` | read-only health report (services, kernel, battery, disk, scrub) |
 | `cleanup` | autoremove, journal, Flatpak runtimes, package cache |
 
 Optional, not part of a plain run:
 
 ```bash
-fedora-setup release   # upgrade to the next Fedora release (e.g. 44 -> 45)
+fedora-setup release   # upgrade to the next Fedora release
 fedora-setup session   # re-apply the desktop-only steps (runs itself at login when needed)
 ```
 
@@ -132,7 +132,7 @@ tells you when they apply and never pretends otherwise:
 ## Requirements
 
 - Fedora **41 or newer** (dnf5), Workstation or another GNOME spin. Built and
-  tested on Fedora 44 / GNOME 50. Atomic editions (Silverblue) are refused.
+  tested on Fedora Workstation / GNOME. Atomic editions (Silverblue) are refused.
 - Run as your normal user, **not** with `sudo`. The script asks for sudo itself.
 - x86_64. GPU, ThinkPad and battery steps are detected and skipped if absent.
 

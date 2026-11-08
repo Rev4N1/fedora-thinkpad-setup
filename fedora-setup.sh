@@ -2,7 +2,7 @@
 #
 # fedora-setup.sh — set up, update and maintain Fedora GNOME with one command
 #
-# Target:  Fedora 41+ (dnf5). Written on Fedora 44 Workstation / GNOME 50 for a
+# Target:  Fedora 41+ (dnf5). Written on Fedora Workstation / GNOME for a
 #          ThinkPad T14 Gen 1 AMD, but every hardware-specific step is detected
 #          first and skipped on other machines, so it also works on plain
 #          Fedora GNOME spins.
@@ -38,7 +38,7 @@
 #   vpn        import wireguard/*.conf into NetworkManager
 #   gnome      GNOME preferences, extensions, terminal transparency
 #   laptop     tuned, TRIM, boot, firmware, fingerprint, ThinkPad extras
-#   sweep      final dnf/Flatpak/firmware update pass
+#   sweep      final dnf/Flatpak/GNOME extension/firmware update pass
 #   health     read-only health report
 #   cleanup    autoremove, journal, Flatpak runtimes, package cache
 #
@@ -109,6 +109,7 @@ FIRST_RUN=1
 # Set when a stage could not do its desktop-only work (no session bus), so the
 # script can queue a one-shot autostart entry instead of asking you to do it.
 SESSION_PENDING=0
+EXT_UPDATES_STAGED=0
 
 # ---------------------------------------------------------------- plumbing ---
 
@@ -412,11 +413,8 @@ preflight() {
   fi
   if (( major < 41 )); then
     die "Fedora $ver is too old: this script needs dnf5 (Fedora 41 or newer)."
-  elif (( major != 44 )); then
-    warn "written and tested on Fedora 44; detected Fedora $ver — package names may differ."
-  else
-    ok "Fedora 44 detected"
   fi
+  ok "Fedora $ver detected"
 
   local dnfver
   dnfver="$(dnf --version 2>/dev/null | head -n1 || true)"
@@ -1213,6 +1211,70 @@ not_gnome() {
   [[ -n "${XDG_CURRENT_DESKTOP:-}" && "${XDG_CURRENT_DESKTOP:-}" != *GNOME* ]]
 }
 
+# Extensions installed from extensions.gnome.org (by the browser, Extension
+# Manager or by hand) live in ~/.local/share/gnome-shell/extensions and are
+# invisible to dnf, so 'dnf upgrade' never updates them. After a release
+# upgrade they are the ones that go OUT OF DATE. Ask GNOME Shell itself to
+# fetch the versions built for the running shell: it downloads them into
+# extension-updates/ and swaps them in at the next login (Wayland cannot
+# reload extensions live). Needs a session bus; returns 1 without one.
+gnome_extensions_update() {
+  [[ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]] || return 1
+  have gdbus || return 1
+
+  local userdir="${XDG_DATA_HOME:-$HOME/.local/share}/gnome-shell/extensions"
+  local stagedir="${XDG_DATA_HOME:-$HOME/.local/share}/gnome-shell/extension-updates"
+
+  if [[ ! -d "$userdir" ]] || [[ -z "$(ls -A "$userdir" 2>/dev/null)" ]]; then
+    ok "no user-installed extensions — Fedora-packaged ones update with dnf"
+    return 0
+  fi
+
+  if ! run_sh "gdbus call --session --dest org.gnome.Shell.Extensions \
+      --object-path /org/gnome/Shell/Extensions \
+      --method org.gnome.Shell.Extensions.CheckForUpdates >/dev/null"; then
+    warn "GNOME Shell did not answer the extension update check"
+    return 0
+  fi
+  (( DRY_RUN )) && return 0
+
+  # The D-Bus call only starts the check; the downloads land asynchronously.
+  local i staged=""
+  for (( i = 0; i < 10; i++ )); do
+    staged="$(ls -A "$stagedir" 2>/dev/null || true)"
+    [[ -n "$staged" ]] && break
+    sleep 1
+  done
+
+  if [[ -n "$staged" ]]; then
+    ok "extension updates downloaded — applied at your next login:"
+    printf '       %s\n' $staged
+    EXT_UPDATES_STAGED=1
+  else
+    ok "user extensions are current"
+  fi
+
+  # Anything still unusable has no release for this shell yet (or is broken).
+  if have gnome-extensions; then
+    local uuid state bad=""
+    for uuid in $(gnome-extensions list --user 2>/dev/null); do
+      state="$(gnome-extensions info "$uuid" 2>/dev/null | sed -n 's/^ *State: *//p')"
+      case "$state" in
+        *"OUT OF DATE"*|*ERROR*) bad+="       $uuid ($state)"$'\n' ;;
+      esac
+    done
+    if [[ -n "$bad" ]]; then
+      printf '%s' "$bad"
+      if [[ -n "$staged" ]]; then
+        ok "if they are among the downloaded updates, they will work after you log in again"
+      else
+        warn "extension(s) above do not work on this GNOME Shell and have no update on extensions.gnome.org yet"
+      fi
+    fi
+  fi
+  return 0
+}
+
 stage_gnome() {
   step "10. GNOME"
 
@@ -1318,7 +1380,7 @@ stage_laptop() {
   # shim, so GNOME's power slider talks to tuned now. TLP drives the same
   # kernel knobs and the two fight if both are running.
   if installed tlp; then
-    warn "TLP is installed and conflicts with tuned-ppd on Fedora 44."
+    warn "TLP is installed and conflicts with tuned-ppd on Fedora."
     warn "to return to Fedora's default: sudo dnf remove tlp tlp-rdw"
   else
     ok "TLP not installed (good — tuned owns power management here)"
@@ -1513,6 +1575,14 @@ stage_sweep() {
   run_sh "sudo flatpak update -y --noninteractive || true"
   run_sh "flatpak update -y --noninteractive || true"
 
+  # GNOME extensions from extensions.gnome.org — dnf does not see these.
+  log "GNOME extensions (extensions.gnome.org)"
+  if not_gnome; then
+    ok "desktop is ${XDG_CURRENT_DESKTOP}, not GNOME — skipping"
+  elif ! gnome_extensions_update; then
+    ok "no desktop session — skipping (run again from the desktop to update extensions)"
+  fi
+
   # Metadata was refreshed in the update stage (and by Fedora's own
   # fwupd-refresh timer). --no-reboot-check: '-y' would otherwise also answer
   # "Restart now?" and reboot the laptop in the middle of the script. Many
@@ -1632,7 +1702,7 @@ stage_cleanup() {
   report "sudo find /etc \\( -name '*.rpmnew' -o -name '*.rpmsave' \\) -print" \
     "merge the files above by running: sudo rpmconf -a"
 
-  # Retired packages only appear after a release upgrade (44 -> 45), so this
+  # Retired packages only appear after a release upgrade, so this
   # is only mentioned on the first run after the Fedora version changes.
   local ver last_ver stamp="$STATE_DIR/fedora-version"
   ver="$(rpm -E %fedora)"
@@ -1747,6 +1817,10 @@ finish() {
 
   if (( SESSION_PENDING )); then
     schedule_session_finalize
+  fi
+
+  if (( EXT_UPDATES_STAGED )); then
+    ok "log out and back in to load the updated GNOME extensions."
   fi
 
   if (( FIRST_RUN && FULL_RUN && ! DRY_RUN )); then
