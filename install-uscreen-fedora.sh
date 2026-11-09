@@ -52,9 +52,10 @@ command -v sudo >/dev/null || die "sudo is required."
 sudo -v   # ask for the password once up front
 # Keep sudo warm: an evdi build plus downloads can outlast its 5-minute timeout.
 while true; do sudo -n true 2>/dev/null || true; sleep 60; kill -0 "$$" 2>/dev/null || exit 0; done &
+SUDO_KEEPALIVE=$!
 
 WORKDIR="$(mktemp -d -t uscreen-install.XXXXXX)"
-trap 'rm -rf "$WORKDIR"' EXIT
+trap 'kill "$SUDO_KEEPALIVE" 2>/dev/null || true; rm -rf "$WORKDIR"' EXIT
 cd "$WORKDIR"
 
 # ---------- 1. RPM Fusion ----------
@@ -89,10 +90,8 @@ fi
 # they may already be gone from the repos — that is fine: DKMS builds evdi
 # for the new kernel (whose headers came with 'kernel-devel' above) and it
 # loads after the reboot.
-KDEVEL_OK=1
 if ! rpm -q "kernel-devel-${KVER}" >/dev/null 2>&1; then
     sudo dnf install -y "kernel-devel-${KVER}" || {
-        KDEVEL_OK=0
         warn "No headers available for the running kernel ($KVER) — a newer kernel is probably installed."
         warn "evdi will be built for it; reboot into it, then run this script again."
     }
@@ -114,35 +113,78 @@ if [[ -z "$EVDI_TAG" ]]; then
 fi
 
 EVDI_VER="${EVDI_TAG#v}"
-# Whatever version is registered now — the fallback if the new one fails.
-OLD_EVDI="$({ dkms status evdi 2>/dev/null || true; } | grep -oE '^evdi/[^,: ]+' | sort -V | tail -n1 || true)"
+
+# Kernels that have headers installed (/lib/modules/<k>/build is a dangling
+# symlink without kernel-devel). After a kernel update without a reboot the
+# running kernel is not among them, but the new one is.
+kernels_with_headers() {
+    local d
+    for d in /lib/modules/*/build; do
+        [[ -e "$d/Makefile" ]] && basename "$(dirname "$d")"
+    done
+    return 0
+}
+
+# Build and install evdi/<ver> for every kernel with headers; succeeds if at
+# least one build worked. Replaces evdi's 'make install_dkms', which only ever
+# builds for the running kernel and so fails right after a kernel update.
+# Kernels that already have it are skipped. EVDI_ALL_OK=1 when every kernel
+# with headers ends up with it.
+EVDI_ALL_OK=0
+evdi_build_all() {
+    local ver="$1" k ok=0
+    EVDI_ALL_OK=1
+    while read -r k; do
+        [[ -n "$k" ]] || continue
+        if dkms status "evdi/${ver}" -k "$k" 2>/dev/null | grep -q 'installed'; then
+            ok=1
+        elif sudo dkms install "evdi/${ver}" -k "$k"; then
+            ok=1
+        else
+            EVDI_ALL_OK=0
+            warn "evdi ${ver} did not build for $k — see /var/lib/dkms/evdi/${ver}/build/make.log"
+        fi
+    done < <(kernels_with_headers)
+    [[ $ok -eq 1 ]]
+}
+
+# Newest version actually installed for some kernel — the fallback if the new
+# one fails. Versions that are only 'added' (a failed earlier run) don't count.
+OLD_EVDI="$({ dkms status evdi 2>/dev/null || true; } | grep 'installed' | grep -oE '^evdi/[^,: ]+' | sort -V | tail -n1 || true)"
 
 info "evdi ${EVDI_VER} via DKMS"
-if dkms status evdi 2>/dev/null | grep -q "^evdi/${EVDI_VER}[,:]"; then
-    echo "evdi ${EVDI_VER} already registered with DKMS."
-elif git clone --depth 1 --branch "$EVDI_TAG" https://github.com/DisplayLink/evdi.git \
-     && ( cd evdi/module && sudo make install_dkms ); then
-    # Drop older evdi versions so DKMS does not build several on every kernel update.
-    { dkms status evdi 2>/dev/null | grep -oE '^evdi/[^,: ]+' || true; } | sort -u | while read -r old; do
-        [[ "$old" == "evdi/${EVDI_VER}" ]] || sudo dkms remove "$old" --all || true
-    done
+if dkms status evdi 2>/dev/null | grep "^evdi/${EVDI_VER}[,:]" | grep -q 'installed'; then
+    echo "evdi ${EVDI_VER} already installed with DKMS."
+elif { sudo dkms remove "evdi/${EVDI_VER}" --all >/dev/null 2>&1 || true; } \
+     && sudo rm -rf "/usr/src/evdi-${EVDI_VER}" \
+     && git clone --depth 1 --branch "$EVDI_TAG" https://github.com/DisplayLink/evdi.git \
+     && sudo dkms add "$PWD/evdi/module" \
+     && evdi_build_all "$EVDI_VER"; then
+    # Drop older evdi versions so DKMS does not build several on every kernel
+    # update — but only once the new one is in place for every kernel, so a
+    # kernel the new version failed on keeps its working module.
+    if [[ $EVDI_ALL_OK -eq 1 ]]; then
+        { dkms status evdi 2>/dev/null | grep -oE '^evdi/[^,: ]+' || true; } | sort -u | while read -r old; do
+            [[ "$old" == "evdi/${EVDI_VER}" ]] || sudo dkms remove "$old" --all || true
+        done
+    else
+        warn "evdi ${EVDI_VER} did not build for every kernel; keeping older versions alongside it."
+    fi
 elif [[ -n "$OLD_EVDI" ]]; then
     # A brand-new evdi release that does not build yet must not take UScreen
     # down with it: keep using the version that already works.
     sudo dkms remove "evdi/${EVDI_VER}" --all >/dev/null 2>&1 || true
+    sudo rm -rf "/usr/src/evdi-${EVDI_VER}"
     warn "evdi ${EVDI_VER} could not be fetched or built — keeping ${OLD_EVDI#evdi/}."
     EVDI_VER="${OLD_EVDI#evdi/}"
 else
     die "evdi ${EVDI_VER} could not be fetched or built. Check /var/lib/dkms/evdi/${EVDI_VER}/build/make.log, or try another version with --evdi vX.Y.Z."
 fi
 
-# Registered is not the same as built for this kernel: after a kernel update
-# DKMS may not have rebuilt it yet (or the build failed back then).
-if [[ $KDEVEL_OK -eq 1 ]] && ! dkms status evdi -k "$KVER" 2>/dev/null | grep -q 'installed'; then
-    info "Building evdi ${EVDI_VER} for the running kernel ($KVER)"
-    sudo dkms install "evdi/${EVDI_VER}" -k "$KVER" \
-      || warn "evdi build for $KVER failed — see /var/lib/dkms/evdi/${EVDI_VER}/build/make.log"
-fi
+# Installed is not the same as built for every kernel: after a kernel update
+# DKMS may not have rebuilt it yet (or the build failed back then). Kernels
+# that already have it are skipped, so this is a no-op when all is well.
+evdi_build_all "$EVDI_VER" || warn "evdi ${EVDI_VER} is not built for any installed kernel."
 
 SB_ON=0
 if command -v mokutil >/dev/null && mokutil --sb-state 2>/dev/null | grep -qi "enabled"; then
@@ -195,7 +237,8 @@ else
 
     if curl -fsL -o SHA256SUMS "$BASE/SHA256SUMS"; then
         info "Verifying checksums"
-        if ! grep -q " \*\?${RPM}\$" SHA256SUMS; then
+        # Exact file-name match (a regex would treat the dots in $RPM as wildcards).
+        if ! awk -v f="$RPM" '{ n = $2; sub(/^\*/, "", n) } n == f { found = 1 } END { exit !found }' SHA256SUMS; then
             # Otherwise sha256sum fails with "no file was verified", which
             # would read as a mismatch.
             warn "SHA256SUMS does not list $RPM; skipping verification."
