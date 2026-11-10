@@ -1207,6 +1207,22 @@ gnome_extension_enable() {
   return 0
 }
 
+# Undo gnome_extension_enable for an extension this script used to ship.
+gnome_extension_disable() {
+  local uuid=$1 current
+  current="$(gsettings get org.gnome.shell enabled-extensions 2>/dev/null || echo '@as []')"
+  contains "$current" "'$uuid'" || return 0
+  current="${current//", '$uuid'"/}"
+  current="${current//"'$uuid', "/}"
+  current="${current//"'$uuid'"/}"
+  [[ "$current" == "[]" ]] && current="@as []"
+  run gsettings set org.gnome.shell enabled-extensions "$current"
+  if have gnome-extensions; then
+    run_sh "gnome-extensions disable '$uuid' 2>/dev/null || true"
+  fi
+  return 0
+}
+
 not_gnome() {
   [[ -n "${XDG_CURRENT_DESKTOP:-}" && "${XDG_CURRENT_DESKTOP:-}" != *GNOME* ]]
 }
@@ -1281,14 +1297,21 @@ stage_gnome() {
   dnf_try gnome-tweaks
   flatpak_install com.mattjakeman.ExtensionManager
 
-  log "Extensions: Dash to Dock + Blur my Shell + Caffeine"
-  # All three are packaged by Fedora, so use those rather than
+  log "Extensions: Dash to Dock + Blur my Shell"
+  # Both are packaged by Fedora, so use those rather than
   # extensions.gnome.org: they are built against the shell Fedora ships, and
   # update with the system instead of breaking on a shell upgrade.
   dnf_try \
     gnome-shell-extension-dash-to-dock \
-    gnome-shell-extension-blur-my-shell \
-    gnome-shell-extension-caffeine
+    gnome-shell-extension-blur-my-shell
+
+  # Caffeine used to be installed here. On a laptop it mostly keeps the screen
+  # on and blocks suspend by accident, costing battery, so it is removed from
+  # machines set up by an older version of this script.
+  if installed gnome-shell-extension-caffeine; then
+    run sudo dnf remove -y gnome-shell-extension-caffeine \
+      || warn "could not remove gnome-shell-extension-caffeine"
+  fi
 
   if not_gnome; then
     ok "desktop is ${XDG_CURRENT_DESKTOP}, not GNOME — skipping GNOME settings"
@@ -1347,7 +1370,7 @@ gnome_settings() {
     gset org.gnome.shell disable-user-extensions false
     gnome_extension_enable dash-to-dock@micxgx.gmail.com
     gnome_extension_enable blur-my-shell@aunetx
-    gnome_extension_enable caffeine@patapon.info
+    gnome_extension_disable caffeine@patapon.info
   fi
 
   # Ptyxis is the default GNOME terminal since F41. The widely-copied

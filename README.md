@@ -109,8 +109,9 @@ warns if a tunnel file is readable by other users.
   are downloaded once, a `ThinkPad T14 Speakers` preset (convolver + limiter)
   is written, and autoload profiles pick it for the internal speakers and a
   flat preset for headphones/HDMI. No GUI steps.
-- **GNOME extensions** (Dash to Dock, Blur my Shell, Caffeine) are installed
-  from Fedora and added to `enabled-extensions`.
+- **GNOME extensions** (Dash to Dock, Blur my Shell) are installed from Fedora
+  and added to `enabled-extensions`. Caffeine is no longer shipped: re-running
+  the script removes it so it cannot keep the laptop awake on battery.
 - **Desktop-only work** (GNOME keys, extension activation, starting the audio
   service) is queued in `~/.config/autostart` when the script runs without a
   session — e.g. over SSH or from a TTY — and applied once at your next login.
