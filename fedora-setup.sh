@@ -1249,6 +1249,22 @@ gnome_extension_disable() {
   return 0
 }
 
+# gnome_extension_remove UUID — disable it and delete a per-user copy
+# (installed from extensions.gnome.org or Extension Manager, which dnf never
+# sees). The Fedora package, if any, is removed separately with dnf.
+gnome_extension_remove() {
+  local uuid=$1
+  local dir="${XDG_DATA_HOME:-$HOME/.local/share}/gnome-shell/extensions/$uuid"
+  gnome_extension_disable "$uuid"
+  [[ -d "$dir" ]] || return 0
+  if have gnome-extensions; then
+    run_sh "gnome-extensions uninstall '$uuid' 2>/dev/null || true"
+  fi
+  [[ -d "$dir" ]] && ! (( DRY_RUN )) && run rm -rf -- "$dir"
+  ok "removed user extension $uuid"
+  return 0
+}
+
 not_gnome() {
   [[ -n "${XDG_CURRENT_DESKTOP:-}" && "${XDG_CURRENT_DESKTOP:-}" != *GNOME* ]]
 }
@@ -1404,7 +1420,7 @@ gnome_settings() {
     gset org.gnome.shell disable-user-extensions false
     gnome_extension_enable dash-to-dock@micxgx.gmail.com
     gnome_extension_enable blur-my-shell@aunetx
-    gnome_extension_disable caffeine@patapon.info
+    gnome_extension_remove caffeine@patapon.info
   fi
 
   # Ptyxis is the default GNOME terminal since F41. The widely-copied
