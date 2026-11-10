@@ -1207,6 +1207,32 @@ gnome_extension_enable() {
   return 0
 }
 
+# ego_install UUID — put the extensions.gnome.org build for the running shell
+# in ~/.local/share/gnome-shell/extensions. Skipped when a user copy already
+# exists: gnome_extensions_update keeps that one current.
+ego_install() {
+  local uuid=$1 shell zip
+  local userdir="${XDG_DATA_HOME:-$HOME/.local/share}/gnome-shell/extensions"
+  if [[ -d "$userdir/$uuid" ]]; then
+    ok "user copy of $uuid present — updated with the other user extensions"
+    return 0
+  fi
+  have gnome-shell && have gnome-extensions || return 0
+  shell="$(gnome-shell --version 2>/dev/null | grep -oE '[0-9]+' | head -n1)"
+  [[ -n "$shell" ]] || { warn "could not read the GNOME Shell version"; return 0; }
+  (( DRY_RUN )) && { run gnome-extensions install --force "$uuid.zip"; return 0; }
+  zip="$(mktemp --suffix=.zip)"
+  if curl -fsSL -o "$zip" \
+      "https://extensions.gnome.org/download-extension/$uuid.shell-extension.zip?shell_version=$shell" \
+      && run gnome-extensions install --force "$zip"; then
+    ok "installed $uuid from extensions.gnome.org (active after your next login)"
+  else
+    warn "could not install $uuid from extensions.gnome.org; keeping the Fedora package"
+  fi
+  rm -f "$zip"
+  return 0
+}
+
 # Undo gnome_extension_enable for an extension this script used to ship.
 gnome_extension_disable() {
   local uuid=$1 current
@@ -1304,6 +1330,14 @@ stage_gnome() {
   dnf_try \
     gnome-shell-extension-dash-to-dock \
     gnome-shell-extension-blur-my-shell
+
+  # Fedora 45 packages Blur my Shell 75, whose dynamic blur needs the separate
+  # gnome-rounded-blur library for rounded corners; without it popups such as
+  # Quick Settings get opaque square blocks in their corners. 77+ draws the
+  # corners itself, so install the extensions.gnome.org build per user: it
+  # takes precedence over the system copy, which stays as a fallback, and
+  # stays current through gnome_extensions_update.
+  not_gnome || ego_install blur-my-shell@aunetx
 
   # Caffeine used to be installed here. On a laptop it mostly keeps the screen
   # on and blocks suspend by accident, costing battery, so it is removed from
