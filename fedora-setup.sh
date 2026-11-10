@@ -1233,38 +1233,6 @@ ego_install() {
   return 0
 }
 
-# Undo gnome_extension_enable for an extension this script used to ship.
-gnome_extension_disable() {
-  local uuid=$1 current
-  current="$(gsettings get org.gnome.shell enabled-extensions 2>/dev/null || echo '@as []')"
-  contains "$current" "'$uuid'" || return 0
-  current="${current//", '$uuid'"/}"
-  current="${current//"'$uuid', "/}"
-  current="${current//"'$uuid'"/}"
-  [[ "$current" == "[]" ]] && current="@as []"
-  run gsettings set org.gnome.shell enabled-extensions "$current"
-  if have gnome-extensions; then
-    run_sh "gnome-extensions disable '$uuid' 2>/dev/null || true"
-  fi
-  return 0
-}
-
-# gnome_extension_remove UUID — disable it and delete a per-user copy
-# (installed from extensions.gnome.org or Extension Manager, which dnf never
-# sees). The Fedora package, if any, is removed separately with dnf.
-gnome_extension_remove() {
-  local uuid=$1
-  local dir="${XDG_DATA_HOME:-$HOME/.local/share}/gnome-shell/extensions/$uuid"
-  gnome_extension_disable "$uuid"
-  [[ -d "$dir" ]] || return 0
-  if have gnome-extensions; then
-    run_sh "gnome-extensions uninstall '$uuid' 2>/dev/null || true"
-  fi
-  [[ -d "$dir" ]] && ! (( DRY_RUN )) && run rm -rf -- "$dir"
-  ok "removed user extension $uuid"
-  return 0
-}
-
 not_gnome() {
   [[ -n "${XDG_CURRENT_DESKTOP:-}" && "${XDG_CURRENT_DESKTOP:-}" != *GNOME* ]]
 }
@@ -1350,17 +1318,15 @@ stage_gnome() {
   # Fedora 45 packages Blur my Shell 75, whose dynamic blur needs the separate
   # gnome-rounded-blur library for rounded corners; without it popups such as
   # Quick Settings get opaque square blocks in their corners. 77+ draws the
-  # corners itself, so install the extensions.gnome.org build per user: it
-  # takes precedence over the system copy, which stays as a fallback, and
-  # stays current through gnome_extensions_update.
-  not_gnome || ego_install blur-my-shell@aunetx
-
-  # Caffeine used to be installed here. On a laptop it mostly keeps the screen
-  # on and blocks suspend by accident, costing battery, so it is removed from
-  # machines set up by an older version of this script.
-  if installed gnome-shell-extension-caffeine; then
-    run sudo dnf remove -y gnome-shell-extension-caffeine \
-      || warn "could not remove gnome-shell-extension-caffeine"
+  # corners itself, so until Fedora ships 77+ install the extensions.gnome.org
+  # build per user: it takes precedence over the system copy, which stays as a
+  # fallback, and stays current through gnome_extensions_update.
+  local bms_ver
+  bms_ver="$(rpm -q --qf '%{VERSION}' gnome-shell-extension-blur-my-shell 2>/dev/null || true)"
+  if [[ "$bms_ver" =~ ^[0-9]+$ ]] && (( bms_ver >= 77 )); then
+    ok "Fedora's Blur my Shell ($bms_ver) draws rounded corners itself"
+  else
+    not_gnome || ego_install blur-my-shell@aunetx
   fi
 
   if not_gnome; then
@@ -1420,7 +1386,6 @@ gnome_settings() {
     gset org.gnome.shell disable-user-extensions false
     gnome_extension_enable dash-to-dock@micxgx.gmail.com
     gnome_extension_enable blur-my-shell@aunetx
-    gnome_extension_remove caffeine@patapon.info
   fi
 
   # Ptyxis is the default GNOME terminal since F41. The widely-copied

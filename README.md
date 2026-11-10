@@ -110,10 +110,11 @@ warns if a tunnel file is readable by other users.
   is written, and autoload profiles pick it for the internal speakers and a
   flat preset for headphones/HDMI. No GUI steps.
 - **GNOME extensions** (Dash to Dock, Blur my Shell) are installed from Fedora
-  and added to `enabled-extensions`. Blur my Shell is additionally installed
-  per user from extensions.gnome.org, because Fedora 45's build (v75) leaves
-  opaque squares in the rounded corners of popups. Caffeine is no longer shipped: re-running
-  the script removes it so it cannot keep the laptop awake on battery.
+  and added to `enabled-extensions`. While Fedora's Blur my Shell is older
+  than v77 (Fedora 45 ships v75, which leaves opaque squares in the rounded
+  corners of popups), the extensions.gnome.org build is also installed per
+  user and takes precedence. Caffeine is no longer installed, to save battery;
+  an existing install is left alone.
 - **Desktop-only work** (GNOME keys, extension activation, starting the audio
   service) is queued in `~/.config/autostart` when the script runs without a
   session — e.g. over SSH or from a TTY — and applied once at your next login.
