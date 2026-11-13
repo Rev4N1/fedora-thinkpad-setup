@@ -148,18 +148,50 @@ evdi_build_all() {
     [[ $ok -eq 1 ]]
 }
 
+# GNOME 51 fix (DisplayLink/evdi#597): evdi accepts framebuffers in 32 bpp
+# formats its planes cannot scan out (e.g. 10-bit AR30). Mutter 51 picks
+# exactly that for secondary GPUs, never falls back, and the evdi screen stays
+# black with "Page flip failed" in the journal. Reject unsupported formats in
+# ADDFB2, as proposed upstream. Skipped if upstream already does it.
+EVDI_PATCH_MARK="drm_any_plane_has_format"
+patch_evdi() {   # <module dir>
+    local f="$1/evdi_fb.c"
+    grep -q "$EVDI_PATCH_MARK" "$f" && return 0
+    awk -v mark="$EVDI_PATCH_MARK" '
+        { print }
+        /Unsupported bpp/ { inbpp = 1 }
+        inbpp && /^\t}$/ {
+            print ""
+            print "\t/* GNOME 51: refuse formats no plane supports (evdi#597) */"
+            print "\tif (!" mark "(dev, mode_cmd->pixel_format, mode_cmd->modifier[0]))"
+            print "\t\treturn ERR_PTR(-EINVAL);"
+            inbpp = 0
+        }' "$f" > "$f.new" && mv "$f.new" "$f"
+    if grep -q "$EVDI_PATCH_MARK" "$f"; then
+        echo "Patched evdi for GNOME 51 (evdi#597)."
+    else
+        warn "Could not apply the GNOME 51 evdi patch; building it unpatched (GNOME may show a black screen)."
+    fi
+    return 0
+}
+evdi_patched() { grep -q "$EVDI_PATCH_MARK" "/usr/src/evdi-$1/evdi_fb.c" 2>/dev/null; }
+EVDI_REBUILT=0
+
 # Newest version actually installed for some kernel — the fallback if the new
 # one fails. Versions that are only 'added' (a failed earlier run) don't count.
 OLD_EVDI="$({ dkms status evdi 2>/dev/null || true; } | grep 'installed' | grep -oE '^evdi/[^,: ]+' | sort -V | tail -n1 || true)"
 
 info "evdi ${EVDI_VER} via DKMS"
-if dkms status evdi 2>/dev/null | grep "^evdi/${EVDI_VER}[,:]" | grep -q 'installed'; then
+if dkms status evdi 2>/dev/null | grep "^evdi/${EVDI_VER}[,:]" | grep -q 'installed' \
+   && evdi_patched "$EVDI_VER"; then
     echo "evdi ${EVDI_VER} already installed with DKMS."
 elif { sudo dkms remove "evdi/${EVDI_VER}" --all >/dev/null 2>&1 || true; } \
      && sudo rm -rf "/usr/src/evdi-${EVDI_VER}" \
      && git clone --depth 1 --branch "$EVDI_TAG" https://github.com/DisplayLink/evdi.git \
+     && patch_evdi evdi/module \
      && sudo dkms add "$PWD/evdi/module" \
      && evdi_build_all "$EVDI_VER"; then
+    EVDI_REBUILT=1
     # Drop older evdi versions so DKMS does not build several on every kernel
     # update — but only once the new one is in place for every kernel, so a
     # kernel the new version failed on keeps its working module.
@@ -170,7 +202,7 @@ elif { sudo dkms remove "evdi/${EVDI_VER}" --all >/dev/null 2>&1 || true; } \
     else
         warn "evdi ${EVDI_VER} did not build for every kernel; keeping older versions alongside it."
     fi
-elif [[ -n "$OLD_EVDI" ]]; then
+elif [[ -n "$OLD_EVDI" && "$OLD_EVDI" != "evdi/${EVDI_VER}" ]]; then
     # A brand-new evdi release that does not build yet must not take UScreen
     # down with it: keep using the version that already works.
     sudo dkms remove "evdi/${EVDI_VER}" --all >/dev/null 2>&1 || true
@@ -215,6 +247,22 @@ if [[ ! -e /etc/udev/rules.d/60-uscreen-uinput.rules && ! -e /usr/lib/udev/rules
 fi
 sudo modprobe uinput 2>/dev/null || true
 [[ $EVDI_CHANGED -eq 0 ]] && echo "Already configured."
+
+# Mutter 51 leaks a dma-buf on every frame it copies to a DisplayLink/evdi
+# output (mutter#5101, fixed by mutter!5300), eating GPU memory fast once the
+# screen works. Copying through the CPU avoids that path. Only affects
+# secondary-GPU outputs. Remove once Fedora's mutter carries the fix.
+MUTTER_CHANGED=0
+MUTTER_ENV=/etc/environment.d/90-uscreen-mutter.conf
+MUTTER_VER="$(rpm -q --qf '%{VERSION}' mutter 2>/dev/null || true)"
+if [[ "$MUTTER_VER" == 51.* ]]; then
+    sudo mkdir -p /etc/environment.d
+    if [[ "$(cat "$MUTTER_ENV" 2>/dev/null || true)" != "MUTTER_DEBUG_MULTI_GPU_FORCE_COPY_MODE=primary-gpu-cpu" ]]; then
+        echo "MUTTER_DEBUG_MULTI_GPU_FORCE_COPY_MODE=primary-gpu-cpu" | sudo tee "$MUTTER_ENV" >/dev/null
+        echo "Wrote $MUTTER_ENV (mutter $MUTTER_VER copy-mode workaround)."
+        MUTTER_CHANGED=1
+    fi
+fi
 
 evdi_count() { cat /sys/devices/evdi/count 2>/dev/null || echo 0; }
 
@@ -311,8 +359,16 @@ if [[ $GET_APK -eq 1 ]]; then
 fi
 
 # ---------- done ----------
+REBOOT_MSG=""
+if [[ $EVDI_REBUILT -eq 1 && -d /sys/module/evdi ]]; then
+    REBOOT_MSG="evdi was rebuilt but the old module is still loaded (GNOME holds it): REBOOT so the new one is used."
+elif [[ $MUTTER_CHANGED -eq 1 ]]; then
+    REBOOT_MSG="Log out and back in (or reboot) so GNOME picks up $MUTTER_ENV."
+fi
+
 if [[ $UPDATED -eq 0 ]]; then
     info "UScreen is up to date ($VER)."
+    [[ -z "$REBOOT_MSG" ]] || warn "$REBOOT_MSG"
     [[ $MOK_PENDING -eq 0 ]] || warn "evdi still needs the DKMS key enrolled — see the Secure Boot warning above."
     exit 0
 fi
@@ -326,6 +382,7 @@ Next steps:
   2. Plug the tablet in and accept the "Allow USB debugging" prompt.
   3. It should appear as a new monitor. If not, run:  uscreen doctor
 EOF
+[[ -z "$REBOOT_MSG" ]] || echo "  !  $REBOOT_MSG"
 [[ $MOK_PENDING -eq 0 ]] || echo "  !  Secure Boot: enroll the DKMS key (see warning above) and reboot, or evdi will not load."
 echo "  Tip: log out and back in (or reboot) so the module/udev changes fully apply."
 echo "  Remember: update the Linux package and the APK together (they share a session token)."
