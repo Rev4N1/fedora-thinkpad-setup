@@ -193,10 +193,47 @@ fi
 MOK=/var/lib/dkms/mok.pub
 MOK_PENDING=0
 
+# What UScreen's own install.sh sets up and the RPM does not: evdi must be
+# loaded with devices (by default it creates none, so there is no virtual
+# connector and no second screen), evdi + uinput must load at boot, and
+# /dev/uinput must be writable by the logged-in user.
+info "evdi / uinput system config"
+EVDI_CHANGED=0
+write_if_diff() {   # <file> <content>
+    if [[ "$(cat "$1" 2>/dev/null || true)" != "$2" ]]; then
+        printf '%s\n' "$2" | sudo tee "$1" >/dev/null
+        echo "Wrote $1"
+        EVDI_CHANGED=1
+    fi
+}
+write_if_diff /etc/modprobe.d/uscreen-evdi.conf "options evdi initial_device_count=2"
+write_if_diff /etc/modules-load.d/uscreen.conf $'evdi\nuinput'
+if [[ ! -e /etc/udev/rules.d/60-uscreen-uinput.rules && ! -e /usr/lib/udev/rules.d/60-uscreen-uinput.rules ]]; then
+    write_if_diff /etc/udev/rules.d/60-uscreen-uinput.rules \
+        'KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"'
+    sudo udevadm control --reload-rules && sudo udevadm trigger || true
+fi
+sudo modprobe uinput 2>/dev/null || true
+[[ $EVDI_CHANGED -eq 0 ]] && echo "Already configured."
+
+evdi_count() { cat /sys/devices/evdi/count 2>/dev/null || echo 0; }
+
 # /sys/module rather than 'lsmod | grep -q': under pipefail, grep quitting
 # early can make the pipeline report "not loaded" when it is.
 if [[ -d /sys/module/evdi ]]; then
-    echo "evdi module already loaded."
+    echo "evdi module already loaded ($(evdi_count) device(s))."
+    if [[ "$(evdi_count)" -lt 1 ]]; then
+        # Loaded earlier without initial_device_count: reload so the option
+        # applies, or, if something holds it, add a device for this boot.
+        if { sudo modprobe -r evdi && sudo modprobe evdi; } 2>/dev/null; then
+            echo "evdi reloaded ($(evdi_count) device(s))."
+        elif echo 1 | sudo tee /sys/devices/evdi/add >/dev/null; then
+            echo "Added an evdi device for this boot ($(evdi_count) device(s))."
+        else
+            warn "evdi has no devices. Reboot so /etc/modprobe.d/uscreen-evdi.conf applies."
+        fi
+        EVDI_CHANGED=1
+    fi
 elif sudo modprobe evdi 2>/dev/null; then
     echo "evdi module loaded."
 elif [[ $SB_ON -eq 1 ]] && [[ -r $MOK ]] && ! sudo mokutil --test-key "$MOK" 2>/dev/null | grep -q 'already enrolled'; then
@@ -257,7 +294,7 @@ fi
 # ---------- 5. User service ----------
 info "uscreen user service"
 systemctl --user daemon-reload
-if [[ $UPDATED -eq 1 ]]; then
+if [[ $UPDATED -eq 1 || $EVDI_CHANGED -eq 1 ]]; then
     systemctl --user enable uscreen && systemctl --user restart uscreen \
       || warn "Service failed to start — run 'uscreen doctor'."
     # udev rule for /dev/uinput needs a reload/re-login to apply
