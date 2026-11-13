@@ -172,9 +172,15 @@ patch_evdi() {   # <module dir>
     else
         warn "Could not apply the GNOME 51 evdi patch; building it unpatched (GNOME may show a black screen)."
     fi
+    # Remember this source was handled, patched or not, so a release the
+    # patch no longer fits is not rebuilt on every run.
+    : > "$1/uscreen-patch-checked"
     return 0
 }
-evdi_patched() { grep -q "$EVDI_PATCH_MARK" "/usr/src/evdi-$1/evdi_fb.c" 2>/dev/null; }
+evdi_patched() {
+    [[ -e "/usr/src/evdi-$1/uscreen-patch-checked" ]] \
+        || grep -q "$EVDI_PATCH_MARK" "/usr/src/evdi-$1/evdi_fb.c" 2>/dev/null
+}
 EVDI_REBUILT=0
 
 # Newest version actually installed for some kernel — the fallback if the new
@@ -262,6 +268,11 @@ if [[ "$MUTTER_VER" == 51.* ]]; then
         echo "Wrote $MUTTER_ENV (mutter $MUTTER_VER copy-mode workaround)."
         MUTTER_CHANGED=1
     fi
+elif [[ -e "$MUTTER_ENV" ]]; then
+    # Newer mutter: the leak is fixed, GPU copying is cheaper again.
+    sudo rm -f "$MUTTER_ENV"
+    echo "Removed $MUTTER_ENV (mutter ${MUTTER_VER:-not installed} no longer needs it)."
+    MUTTER_CHANGED=1
 fi
 
 evdi_count() { cat /sys/devices/evdi/count 2>/dev/null || echo 0; }
