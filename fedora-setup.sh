@@ -1523,9 +1523,16 @@ fprint_fix() {
   local dropin=/etc/systemd/system/fprintd.service.d/50-fedora-setup-no-timeout.conf
   local rule=/etc/udev/rules.d/99-fedora-setup-fprint-no-autosuspend.rules
   local rule_line='ACTION=="add|change", SUBSYSTEM=="usb", ATTR{idVendor}=="06cb", TEST=="power/control", ATTR{power/control}="on"'
-  local reload_units=0 reload_udev=0 reset_usb=0
+  local resume_name=fedora-setup-fprint-resume.service
+  local resume=/etc/systemd/system/$resume_name
+  local sleep_targets="suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target"
+  local reload_units=0 reload_udev=0 reset_usb=0 keep=0
 
   # --- keep fprintd running ---
+  # The firmware resets the sensor on resume; a kept-alive fprintd then holds a
+  # dead handle and the reader stays silent until the daemon restarts. A stock
+  # fprintd heals by exiting when idle, so keep-alive comes with a restart
+  # after every resume.
   if [[ $mode == keepalive || $mode == both ]]; then
     local bin help want
     bin="$(sed -n 's/^ExecStart=\([^ ]*\).*/\1/p' /usr/lib/systemd/system/fprintd.service 2>/dev/null | head -n1)"
@@ -1540,22 +1547,54 @@ ExecStart=$bin --no-timeout"
     elif ! contains "$help" "--no-timeout"; then
       warn "$bin --help does not list --no-timeout — skipping keep-alive"
     elif [[ -f $dropin && "$(cat "$dropin")" == "$want" ]]; then
+      keep=1
       ok "fprintd keep-alive already set"
     else
       run sudo mkdir -p "${dropin%/*}"
       write_root_file "$dropin" <<<"$want"
-      reload_units=1
+      keep=1 reload_units=1
       ok "fprintd keep-alive set"
     fi
-  elif [[ -f $dropin ]]; then
-    run sudo rm -f "$dropin"
-    reload_units=1
-    ok "fprintd keep-alive removed"
+  fi
+  if (( keep )); then
+    want="# Managed by fedora-setup.sh (CFG_FPRINT_FIX): the fingerprint sensor is reset
+# on resume and a kept-alive fprintd would keep its dead handle.
+[Unit]
+Description=Restart fprintd after resume (fedora-setup)
+After=$sleep_targets
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl try-restart fprintd.service
+
+[Install]
+WantedBy=$sleep_targets"
+    if [[ ! -f $resume || "$(cat "$resume")" != "$want" ]]; then
+      write_root_file "$resume" <<<"$want"
+      reload_units=1
+      ok "fprintd restart after resume set"
+    fi
+  else
+    if [[ -f $dropin ]]; then
+      run sudo rm -f "$dropin"
+      reload_units=1
+      ok "fprintd keep-alive removed"
+    fi
+    if [[ -f $resume ]]; then
+      run sudo systemctl disable "$resume_name" || true
+      run sudo rm -f "$resume"
+      reload_units=1
+    fi
   fi
   if (( reload_units )); then
     run sudo systemctl daemon-reload
     # Restarts only a running fprintd; otherwise the next D-Bus start picks it up.
     run sudo systemctl try-restart fprintd.service || true
+  fi
+  if (( keep )); then
+    local en
+    en="$(systemctl is-enabled "$resume_name" 2>/dev/null || true)"
+    [[ $en == enabled ]] || run sudo systemctl enable "$resume_name"
   fi
 
   # --- keep the USB sensor powered ---

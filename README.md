@@ -127,7 +127,8 @@ tells you when they apply and never pretends otherwise:
    reader. The PAM feature (`authselect ... with-fingerprint`) is enabled for
    you, so the first finger you enroll works for login and sudo immediately.
    `CFG_FPRINT_FIX` fixes the reader ignoring the first touch for a few
-   seconds: `keepalive` (default, free) keeps `fprintd` running, `usb` keeps
+   seconds: `keepalive` (default, free) keeps `fprintd` running and restarts it after
+   each resume (the sensor is reset on wake), `usb` keeps
    the sensor out of USB autosuspend (costs some battery), `both`, or `off`.
 2. **Secure Boot / DKMS** (only for the separate UScreen installer's `evdi` module) —
    enrolling the DKMS signing key needs a one-time reboot and password.
