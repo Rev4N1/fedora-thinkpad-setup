@@ -127,6 +127,9 @@ tells you when they apply and never pretends otherwise:
 1. **Fingerprint enrollment** — `fprintd-enroll` needs your finger on the
    reader. The PAM feature (`authselect ... with-fingerprint`) is enabled for
    you, so the first finger you enroll works for login and sudo immediately.
+   `CFG_FPRINT_FIX` fixes the reader ignoring the first touch for a few
+   seconds: `keepalive` (default) keeps `fprintd` running, `usb` keeps the
+   sensor out of USB autosuspend (~0.1-0.5 W), `both`, or `off`.
 2. **Secure Boot / DKMS** (only for the separate UScreen installer's `evdi` module) —
    enrolling the DKMS signing key needs a one-time reboot and password.
 3. **BIOS sleep state** — `BIOS > Config > Power > Sleep State: Linux` enables

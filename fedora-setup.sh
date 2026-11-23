@@ -66,6 +66,7 @@ CFG_BROWSER="helium"         # default browser on first install: helium | none
 CFG_TOUCHPAD_SPEED="0.45"    # GNOME pointer speed, -1.0 (slow) .. 1.0 (fast)
 CFG_AUDIO="auto"             # speaker profile: auto (T14 Gen 1 only) | off | force
 CFG_EXTRA_PACKAGES=""        # extra dnf packages, space separated
+CFG_FPRINT_FIX="keepalive"   # fingerprint wake-up delay fix: keepalive | usb | both | off
 REBOOT_PROMPT=1              # ask "reboot now?" when a new kernel waits: 1 | 0
 
 # ------------------------------------------------------------------ state ---
@@ -1507,6 +1508,8 @@ stage_laptop() {
       || warn "could not enable the fingerprint PAM feature (authselect)"
   fi
 
+  fprint_fix
+
   enrolled="$(fprintd-list "$USER" 2>/dev/null || true)"
   if grep -q ' - #[0-9]' <<<"$enrolled"; then
     ok "fingerprint enrolled and enabled for login/sudo"
@@ -1514,6 +1517,119 @@ stage_laptop() {
     warn "no finger enrolled yet — this one needs your finger on the reader:"
     warn "  fprintd-enroll"
   fi
+}
+
+# fprint_fix — the reader often ignores the first touch for a few seconds.
+# Two independent causes, selected by CFG_FPRINT_FIX:
+#   keepalive  fprintd exits after ~30 s idle, so the next auth waits for the
+#              daemon to start and open the sensor. --no-timeout keeps it up;
+#              an idle fprintd costs no measurable power.
+#   usb        the Synaptics sensor (USB 06cb:*) is runtime-suspended by
+#              libfprint's hwdb and tuned. Keeping it powered removes the
+#              resume, at roughly 0.1-0.5 W while the laptop is awake.
+# Files for the option that is not selected are removed, so switching the
+# setting and re-running the laptop stage is enough.
+fprint_fix() {
+  local mode=$CFG_FPRINT_FIX
+  case $mode in
+    keepalive|usb|both|off) ;;
+    *) warn "CFG_FPRINT_FIX='$mode' is not keepalive|usb|both|off — skipping"; return 0 ;;
+  esac
+
+  local dropin=/etc/systemd/system/fprintd.service.d/50-fedora-setup-no-timeout.conf
+  local rule=/etc/udev/rules.d/99-fedora-setup-fprint-no-autosuspend.rules
+  local man_dropin=/etc/systemd/system/fprintd.service.d/override.conf
+  local man_rule=/etc/udev/rules.d/99-fprint-no-autosuspend.rules
+  local rule_line='ACTION=="add|change", SUBSYSTEM=="usb", ATTR{idVendor}=="06cb", TEST=="power/control", ATTR{power/control}="on"'
+  local reload_units=0 reload_udev=0 reset_usb=0
+
+  # --- hand-made versions of the same fixes (from before this setting) ---
+  # They would mask CFG_FPRINT_FIX, so remove them when they contain nothing
+  # but the fix; anything else in them is left alone with a warning.
+  local body
+  if [[ -f $man_dropin ]]; then
+    body="$(grep -v '^[[:space:]]*\(#\|$\)' "$man_dropin" 2>/dev/null || true)"
+    if [[ $body =~ ^\[Service\]$'\n'ExecStart=$'\n'ExecStart=[^$'\n']*' --no-timeout'$ ]]; then
+      warn "manual fprintd override found: $man_dropin — removing it, CFG_FPRINT_FIX manages this now"
+      run sudo rm -f "$man_dropin"
+      run sudo rmdir --ignore-fail-on-non-empty "${man_dropin%/*}" || true
+      reload_units=1
+    else
+      warn "$man_dropin has other settings too — left alone; remove its --no-timeout line by hand if present"
+    fi
+  fi
+  if [[ -f $man_rule ]]; then
+    body="$(grep -v '^[[:space:]]*\(#\|$\)' "$man_rule" 2>/dev/null || true)"
+    if [[ $body == "$rule_line" ]]; then
+      warn "manual udev rule found: $man_rule — removing it, CFG_FPRINT_FIX manages this now"
+      run sudo rm -f "$man_rule"
+      reload_udev=1 reset_usb=1
+    else
+      warn "$man_rule has other rules too — left alone"
+    fi
+  fi
+
+  # --- keep fprintd running ---
+  if [[ $mode == keepalive || $mode == both ]]; then
+    local bin help want
+    bin="$(sed -n 's/^ExecStart=\([^ ]*\).*/\1/p' /usr/lib/systemd/system/fprintd.service 2>/dev/null | head -n1)"
+    help="$([[ -x $bin ]] && "$bin" --help 2>&1 || true)"
+    want="# Managed by fedora-setup.sh (CFG_FPRINT_FIX): keep fprintd running so the
+# first fingerprint touch is not lost while the daemon starts.
+[Service]
+ExecStart=
+ExecStart=$bin --no-timeout"
+    if [[ -z $bin || ! -x $bin ]]; then
+      warn "could not find fprintd's ExecStart in fprintd.service — skipping keep-alive"
+    elif ! contains "$help" "--no-timeout"; then
+      warn "$bin --help does not list --no-timeout — skipping keep-alive"
+    elif [[ -f $dropin && "$(cat "$dropin")" == "$want" ]]; then
+      ok "fprintd keep-alive already set"
+    else
+      run sudo mkdir -p "${dropin%/*}"
+      write_root_file "$dropin" <<<"$want"
+      reload_units=1
+      ok "fprintd keep-alive set"
+    fi
+  elif [[ -f $dropin ]]; then
+    run sudo rm -f "$dropin"
+    reload_units=1
+    ok "fprintd keep-alive removed"
+  fi
+  if (( reload_units )); then
+    run sudo systemctl daemon-reload
+    # Restarts only a running fprintd; otherwise the next D-Bus start picks it up.
+    run sudo systemctl try-restart fprintd.service || true
+  fi
+
+  # --- keep the USB sensor powered ---
+  if [[ $mode == usb || $mode == both ]]; then
+    want="# Managed by fedora-setup.sh (CFG_FPRINT_FIX): keep the Synaptics fingerprint
+# sensor powered so it answers the first touch. Costs ~0.1-0.5 W while awake.
+$rule_line"
+    reset_usb=0
+    if [[ -f $rule && "$(cat "$rule")" == "$want" ]]; then
+      ok "fingerprint USB autosuspend already off"
+      (( reload_udev )) || return 0
+    else
+      write_root_file "$rule" <<<"$want"
+      ok "fingerprint USB autosuspend off"
+    fi
+    run sudo udevadm control --reload || true
+    run sudo udevadm trigger --subsystem-match=usb --attr-match=idVendor=06cb || true
+  else
+    if [[ -f $rule ]]; then
+      run sudo rm -f "$rule"
+      reload_udev=1 reset_usb=1
+      ok "fingerprint USB autosuspend back to default"
+    fi
+    (( reload_udev )) && { run sudo udevadm control --reload || true; }
+    # Removing the rule doesn't undo power/control; put the default back.
+    if (( reset_usb )); then
+      run_sh 'for d in /sys/bus/usb/devices/*; do [ "$(cat "$d/idVendor" 2>/dev/null)" = 06cb ] && [ -e "$d/power/control" ] && echo auto | sudo tee "$d/power/control" >/dev/null; done; true'
+    fi
+  fi
+  return 0
 }
 
 # -------------------------------------------------------------- 12. session ---
