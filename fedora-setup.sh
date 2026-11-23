@@ -1695,14 +1695,6 @@ stage_sweep() {
     fi
   fi
 
-  # UScreen (separate installer) is only re-run where it is already installed:
-  # its RPM, the evdi DKMS module and the tablet APK come from GitHub, so
-  # nothing else would ever update them.
-  if installed uscreen && [[ -f "$SCRIPT_DIR/install-uscreen-fedora.sh" ]]; then
-    log "UScreen"
-    run bash "$SCRIPT_DIR/install-uscreen-fedora.sh" || warn "UScreen update failed — see above"
-  fi
-
   # System and user Flatpak installations are separate scopes and a plain
   # 'flatpak update' only covers the one you have rights to.
   log "Flatpaks (system + user scopes)"

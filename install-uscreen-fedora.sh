@@ -12,7 +12,9 @@
 #      (evdi is not packaged for Fedora)
 #   4. Installs or upgrades the uscreen RPM, verifying its checksum
 #   5. Enables the systemd *user* service
-#   6. Saves uscreen.apk for the tablet whenever the version changes
+#   6. Keeps the tablet app in step: saves uscreen-<ver>.apk in ~/Downloads
+#      and installs it over adb on a connected tablet (retried every run
+#      until a tablet has it). A new RPM is not installed without its APK.
 #
 # Run as your normal user (NOT with sudo): ./install-uscreen-fedora.sh
 # Options:  --tag v1.2.8      install a specific release instead of latest
@@ -136,7 +138,11 @@ evdi_build_all() {
     EVDI_ALL_OK=1
     while read -r k; do
         [[ -n "$k" ]] || continue
-        if dkms status "evdi/${ver}" -k "$k" 2>/dev/null | grep -q 'installed'; then
+        # Captured, never piped into grep -q: under pipefail an early grep
+        # exit can make a match look like a failure.
+        local st
+        st="$(dkms status "evdi/${ver}" -k "$k" 2>/dev/null || true)"
+        if [[ $st == *installed* ]]; then
             ok=1
         elif sudo dkms install "evdi/${ver}" -k "$k"; then
             ok=1
@@ -185,10 +191,11 @@ EVDI_REBUILT=0
 
 # Newest version actually installed for some kernel — the fallback if the new
 # one fails. Versions that are only 'added' (a failed earlier run) don't count.
-OLD_EVDI="$({ dkms status evdi 2>/dev/null || true; } | grep 'installed' | grep -oE '^evdi/[^,: ]+' | sort -V | tail -n1 || true)"
+DKMS_EVDI="$(dkms status evdi 2>/dev/null || true)"
+OLD_EVDI="$(grep 'installed' <<<"$DKMS_EVDI" | grep -oE '^evdi/[^,: ]+' | sort -V | tail -n1 || true)"
 
 info "evdi ${EVDI_VER} via DKMS"
-if dkms status evdi 2>/dev/null | grep "^evdi/${EVDI_VER}[,:]" | grep -q 'installed' \
+if grep -qE "^evdi/${EVDI_VER//./\\.}[,:].*installed" <<<"$DKMS_EVDI" \
    && evdi_patched "$EVDI_VER"; then
     echo "evdi ${EVDI_VER} already installed with DKMS."
 elif { sudo dkms remove "evdi/${EVDI_VER}" --all >/dev/null 2>&1 || true; } \
@@ -225,9 +232,8 @@ fi
 evdi_build_all "$EVDI_VER" || warn "evdi ${EVDI_VER} is not built for any installed kernel."
 
 SB_ON=0
-if command -v mokutil >/dev/null && mokutil --sb-state 2>/dev/null | grep -qi "enabled"; then
-    SB_ON=1
-fi
+SB_STATE="$(mokutil --sb-state 2>/dev/null || true)"
+[[ ${SB_STATE,,} == *enabled* ]] && SB_ON=1
 MOK=/var/lib/dkms/mok.pub
 MOK_PENDING=0
 
@@ -295,7 +301,7 @@ if [[ -d /sys/module/evdi ]]; then
     fi
 elif sudo modprobe evdi 2>/dev/null; then
     echo "evdi module loaded."
-elif [[ $SB_ON -eq 1 ]] && [[ -r $MOK ]] && ! sudo mokutil --test-key "$MOK" 2>/dev/null | grep -q 'already enrolled'; then
+elif [[ $SB_ON -eq 1 && -r $MOK && "$(sudo mokutil --test-key "$MOK" 2>&1 || true)" != *"already enrolled"* ]]; then
     # The usual first-install case: DKMS signed the module with its own key,
     # which the firmware does not trust until it is enrolled.
     MOK_PENDING=1
@@ -308,46 +314,114 @@ else
     warn "If the kernel was just updated, reboot into it and run this script again."
 fi
 
-# ---------- 4. UScreen RPM ----------
-if [[ -z "$TAG" ]]; then
-    info "Finding latest UScreen release"
-    URL="$(curl -fsSIL -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest")"
-    TAG="${URL##*/}"
-    [[ "$TAG" == v* ]] || die "Could not determine latest release tag (got: $TAG)."
+# ---------- 4. Release: Linux RPM + tablet APK ----------
+# The RPM and the APK share a session token, so they are handled as a pair:
+#   - the API lists the real asset names (no guessing '-1.x86_64'),
+#   - both are downloaded and checksummed BEFORE anything is installed,
+#   - a new RPM is not installed while its APK is unavailable (that would
+#     break the tablet connection until a matching APK appears),
+#   - the APK is pushed to every connected, authorised tablet over adb, and
+#     re-tried on later runs until one has it — independent of the RPM.
+STATE="${XDG_STATE_HOME:-$HOME/.local/state}/uscreen-installer"
+mkdir -p "$STATE"
+APK_DIR="$HOME/Downloads"
+
+info "Finding UScreen release ${TAG:-(latest)}"
+if [[ -n "$TAG" ]]; then
+    API="https://api.github.com/repos/${REPO}/releases/tags/${TAG}"
+else
+    API="https://api.github.com/repos/${REPO}/releases/latest"
+fi
+REL="$(curl -fsSL --max-time 30 "$API" 2>/dev/null || true)"
+RPM_URL="" APK_URL="" SUMS_URL=""
+if [[ -n "$REL" ]]; then
+    TAG="$(grep -m1 '"tag_name"' <<<"$REL" | cut -d'"' -f4 || true)"
+    RPM_URL="$(grep -m1 -oE 'https://[^"]+/uscreen-[^"/]+\.x86_64\.rpm' <<<"$REL" || true)"
+    APK_URL="$(grep -m1 -oE 'https://[^"]+\.apk' <<<"$REL" || true)"
+    SUMS_URL="$(grep -m1 -oE 'https://[^"]+/SHA256SUMS' <<<"$REL" || true)"
+fi
+if [[ -z "$RPM_URL" ]]; then
+    # API rate limit (60 requests/hour without a token) or a network hiccup:
+    # fall back to the release redirect and the usual asset names.
+    if [[ -z "$TAG" ]]; then
+        URL="$(curl -fsSIL -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest" || true)"
+        TAG="${URL##*/}"
+    fi
+    [[ "$TAG" == v* ]] || die "Could not determine the UScreen release (got: '${TAG}')."
+    BASE="https://github.com/${REPO}/releases/download/${TAG}"
+    RPM_URL="$BASE/uscreen-${TAG#v}-1.x86_64.rpm"
+    APK_URL="$BASE/uscreen.apk"
+    SUMS_URL="$BASE/SHA256SUMS"
 fi
 VER="${TAG#v}"
-BASE="https://github.com/${REPO}/releases/download/${TAG}"
-RPM="uscreen-${VER}-1.x86_64.rpm"
+RPM="${RPM_URL##*/}"
+APK_FILE="$APK_DIR/uscreen-${VER}.apk"
 echo "Release: $TAG"
 
-UPDATED=0
-if [[ "$(rpm -q --qf '%{VERSION}' uscreen 2>/dev/null || true)" == "$VER" ]]; then
-    echo "uscreen $VER is already installed — nothing to download."
-    GET_APK=0
-else
-    info "Downloading $RPM"
-    curl -fL --progress-bar -o "$RPM" "$BASE/$RPM" || die "Download failed: $BASE/$RPM"
-    if [[ $GET_APK -eq 1 ]]; then
-        curl -fL --progress-bar -o uscreen.apk "$BASE/uscreen.apk" || { warn "APK download failed."; GET_APK=0; }
-    fi
+CUR_VER="$(rpm -q --qf '%{VERSION}' uscreen 2>/dev/null || true)"
+[[ $CUR_VER == *"not installed"* ]] && CUR_VER=""
+NEED_RPM=0; [[ "$CUR_VER" == "$VER" ]] || NEED_RPM=1
+NEED_APK=0; [[ $GET_APK -eq 1 && ! -s "$APK_FILE" ]] && NEED_APK=1
 
-    if curl -fsL -o SHA256SUMS "$BASE/SHA256SUMS"; then
+if [[ $NEED_RPM -eq 0 && $NEED_APK -eq 0 ]]; then
+    echo "uscreen $VER is installed and its APK is saved — nothing to download."
+fi
+
+APK_OK=0; [[ $GET_APK -eq 1 && -s "$APK_FILE" ]] && APK_OK=1
+if [[ $NEED_APK -eq 1 ]]; then
+    info "Downloading the tablet app (${APK_URL##*/})"
+    curl -fL --progress-bar -o "${APK_URL##*/}" "$APK_URL" && APK_OK=1 \
+        || warn "APK download failed: $APK_URL"
+fi
+if [[ $NEED_RPM -eq 1 ]]; then
+    info "Downloading $RPM"
+    curl -fL --progress-bar -o "$RPM" "$RPM_URL" || die "Download failed: $RPM_URL"
+fi
+
+# Verify whatever was downloaded against the release's SHA256SUMS.
+if [[ $NEED_RPM -eq 1 || $NEED_APK -eq 1 ]]; then
+    if [[ -n "$SUMS_URL" ]] && curl -fsL -o SHA256SUMS "$SUMS_URL"; then
         info "Verifying checksums"
-        # Exact file-name match (a regex would treat the dots in $RPM as wildcards).
-        if ! awk -v f="$RPM" '{ n = $2; sub(/^\*/, "", n) } n == f { found = 1 } END { exit !found }' SHA256SUMS; then
-            # Otherwise sha256sum fails with "no file was verified", which
-            # would read as a mismatch.
-            warn "SHA256SUMS does not list $RPM; skipping verification."
-        else
-            sha256sum -c --ignore-missing SHA256SUMS || die "Checksum mismatch — aborting."
+        LISTED=0
+        for f in "$RPM" "${APK_URL##*/}"; do
+            [[ -s "$f" ]] || continue
+            # Exact file-name match (a regex would treat the dots as wildcards).
+            if awk -v f="$f" '{ n = $2; sub(/^\*/, "", n) } n == f { found = 1 } END { exit !found }' SHA256SUMS; then
+                LISTED=1
+            else
+                warn "SHA256SUMS does not list $f; not verified."
+            fi
+        done
+        # --ignore-missing: SHA256SUMS lists assets that were not downloaded.
+        if [[ $LISTED -eq 1 ]]; then
+            sha256sum -c --ignore-missing --quiet SHA256SUMS \
+                || die "Checksum mismatch — aborting, nothing was installed."
         fi
     else
-        warn "No SHA256SUMS found; skipping verification."
+        warn "No SHA256SUMS for $TAG; downloads not verified."
     fi
+fi
 
-    info "Installing UScreen $VER"
-    sudo dnf install -y --allowerasing "./$RPM"
-    UPDATED=1
+UPDATED=0
+if [[ $NEED_RPM -eq 1 ]]; then
+    if [[ $GET_APK -eq 1 && $APK_OK -eq 0 && -n "$CUR_VER" ]]; then
+        warn "Keeping uscreen $CUR_VER: the $VER APK could not be downloaded, and a"
+        warn "PC/tablet version mismatch breaks the connection. Run this again later."
+    else
+        info "Installing UScreen $VER"
+        sudo dnf install -y "./$RPM"
+        UPDATED=1
+    fi
+fi
+
+if [[ $NEED_APK -eq 1 && $APK_OK -eq 1 && -s "${APK_URL##*/}" ]]; then
+    mkdir -p "$APK_DIR"
+    cp "${APK_URL##*/}" "$APK_FILE"
+    # Older copies saved by this script are useless now (wrong token).
+    for f in "$APK_DIR"/uscreen-*.apk; do
+        [[ "$f" == "$APK_FILE" || ! -e "$f" ]] || rm -f "$f"
+    done
+    echo "Tablet app saved to: $APK_FILE"
 fi
 
 # ---------- 5. User service ----------
@@ -362,11 +436,31 @@ else
     systemctl --user enable --now uscreen || warn "Service failed to start — run 'uscreen doctor'."
 fi
 
-# ---------- 6. APK ----------
-if [[ $GET_APK -eq 1 ]]; then
-    DEST="$HOME/Downloads"; mkdir -p "$DEST"
-    cp uscreen.apk "$DEST/uscreen-${VER}.apk"
-    echo "Tablet app saved to: $DEST/uscreen-${VER}.apk"
+# ---------- 6. APK onto the tablet ----------
+# Installed with adb whenever the tablet is plugged in and authorised; the
+# version pushed last is remembered, so a run without the tablet just says
+# so and the next run with it attached finishes the job.
+TABLET_STAMP="$STATE/apk-on-tablet"
+TABLET_VER="$(cat "$TABLET_STAMP" 2>/dev/null || true)"
+if [[ $GET_APK -eq 1 && -s "$APK_FILE" && "$TABLET_VER" != "$VER" ]]; then
+    info "Tablet app $VER"
+    DEVS=""
+    command -v adb >/dev/null && DEVS="$(adb devices 2>/dev/null | awk 'NR > 1 && $2 == "device" { print $1 }' || true)"
+    if [[ -z "$DEVS" ]]; then
+        warn "No authorised tablet on USB, so the tablet still has ${TABLET_VER:-an unknown version}."
+        warn "Plug it in (allow USB debugging) and run this script again, or:  adb install -r $APK_FILE"
+    else
+        PUSHED=0
+        while read -r dev; do
+            if adb -s "$dev" install -r "$APK_FILE" >/dev/null; then
+                echo "Installed uscreen $VER on tablet $dev."
+                PUSHED=1
+            else
+                warn "adb install failed on $dev — install $APK_FILE on it by hand."
+            fi
+        done <<<"$DEVS"
+        [[ $PUSHED -eq 1 ]] && printf '%s\n' "$VER" >"$TABLET_STAMP"
+    fi
 fi
 
 # ---------- done ----------
@@ -377,23 +471,20 @@ elif [[ $MUTTER_CHANGED -eq 1 ]]; then
     REBOOT_MSG="Log out and back in (or reboot) so GNOME picks up $MUTTER_ENV."
 fi
 
-if [[ $UPDATED -eq 0 ]]; then
-    info "UScreen is up to date ($VER)."
-    [[ -z "$REBOOT_MSG" ]] || warn "$REBOOT_MSG"
-    [[ $MOK_PENDING -eq 0 ]] || warn "evdi still needs the DKMS key enrolled — see the Secure Boot warning above."
-    exit 0
+if [[ $UPDATED -eq 1 ]]; then
+    info "UScreen updated to $VER."
+else
+    info "UScreen is at ${CUR_VER:-$VER}."
 fi
+[[ -z "$REBOOT_MSG" ]] || warn "$REBOOT_MSG"
+[[ $MOK_PENDING -eq 0 ]] || warn "Secure Boot: enroll the DKMS key (see the warning above) and reboot, or evdi will not load."
+if [[ -z "$CUR_VER" && $UPDATED -eq 1 ]]; then
+    cat <<EOF
 
-info "Done!"
-cat <<EOF
-
-Next steps:
-  1. Tablet: install uscreen-${VER}.apk (or via USB:  adb install -r ~/Downloads/uscreen-${VER}.apk)
-     and enable USB debugging (Settings → About → tap Build number 7× → Developer options).
-  2. Plug the tablet in and accept the "Allow USB debugging" prompt.
-  3. It should appear as a new monitor. If not, run:  uscreen doctor
+First-time setup on the tablet:
+  1. Enable USB debugging (Settings → About → tap Build number 7× → Developer options).
+  2. Plug it in, accept "Allow USB debugging", and run this script again —
+     it installs the app over USB. It then shows up as a new monitor.
+  3. If not:  uscreen doctor
 EOF
-[[ -z "$REBOOT_MSG" ]] || echo "  !  $REBOOT_MSG"
-[[ $MOK_PENDING -eq 0 ]] || echo "  !  Secure Boot: enroll the DKMS key (see warning above) and reboot, or evdi will not load."
-echo "  Tip: log out and back in (or reboot) so the module/udev changes fully apply."
-echo "  Remember: update the Linux package and the APK together (they share a session token)."
+fi

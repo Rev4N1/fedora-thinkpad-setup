@@ -39,7 +39,7 @@ keeps installing security updates in between.
 | `vpn` | imports `wireguard/*.conf` into NetworkManager |
 | `gnome` | touchpad, Night Light, keyboard, battery %, extensions, Ptyxis |
 | `laptop` | tuned, TRIM, faster boot, firmware, fingerprint, ThinkPad extras |
-| `sweep` | final dnf/Flatpak/firmware pass, extensions from extensions.gnome.org, UScreen if installed |
+| `sweep` | final dnf/Flatpak/firmware pass, extensions from extensions.gnome.org |
 | `health` | health report (services, kernel, battery, disk) and a monthly btrfs scrub on AC power |
 | `cleanup` | autoremove, journal, Flatpak runtimes, package cache |
 
@@ -147,7 +147,11 @@ tells you when they apply and never pretends otherwise:
 `install-uscreen-fedora.sh` installs
 [UScreen](https://github.com/majmichu1/UScreen) with the `evdi` DKMS module.
 It is a separate script, not part of `fedora-setup`: run it yourself when you
-want it, and re-run it to update UScreen.
+want it, and re-run it to update UScreen. The PC package and the tablet app
+must be the same version, so they are updated as a pair: the APK is saved to
+`~/Downloads/uscreen-<version>.apk` and installed over USB (adb) on the
+tablet if it is plugged in — otherwise the next run with the tablet attached
+does it. A new PC package is never installed without its APK.
 
 ```bash
 ./install-uscreen-fedora.sh
