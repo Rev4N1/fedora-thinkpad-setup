@@ -32,15 +32,15 @@ keeps installing security updates in between.
 | `update` | system upgrade, fwupd metadata refresh |
 | `rpmfusion` | RPM Fusion free/nonfree, AppStream data, OpenH264 repo |
 | `flatpak` | Flathub with the full catalogue (clears the stock filter) |
-| `amd` | AMD VA-API + Vulkan freeworld drivers (skipped if not AMD) |
-| `media` | full ffmpeg, `@multimedia`, GStreamer codecs, OpenH264 |
+| `amd` | AMD VA-API freeworld driver for hardware video decode (skipped if not AMD) |
+| `media` | full ffmpeg, `@multimedia`, GStreamer codecs, OpenH264, Bluetooth aptX |
 | `apps` | VS Code, Helium, Spotifast, Nuvio, Discord, archive tools |
 | `audio` | EasyEffects + T14 Gen 1 Dolby speaker profile, service, autoload |
 | `vpn` | imports `wireguard/*.conf` into NetworkManager |
 | `gnome` | touchpad, Night Light, keyboard, battery %, extensions, Ptyxis |
 | `laptop` | tuned, TRIM, faster boot, firmware, fingerprint, ThinkPad extras |
-| `sweep` | final dnf/Flatpak/firmware pass, plus updates for extensions installed from extensions.gnome.org |
-| `health` | read-only health report (services, kernel, battery, disk, scrub) |
+| `sweep` | final dnf/Flatpak/firmware pass, extensions from extensions.gnome.org, UScreen if installed |
+| `health` | health report (services, kernel, battery, disk) and a monthly btrfs scrub on AC power |
 | `cleanup` | autoremove, journal, Flatpak runtimes, package cache |
 
 Optional, not part of a plain run:
@@ -90,6 +90,7 @@ There is no config file: the few settings live at the top of
 | `CFG_TOUCHPAD_SPEED` | `0.45` | `-1.0` .. `1.0` |
 | `CFG_AUDIO` | `auto` | `auto` (T14 Gen 1 only), `off`, `force` |
 | `CFG_EXTRA_PACKAGES` | empty | extra dnf packages, space separated |
+| `CFG_FPRINT_FIX` | `keepalive` | `keepalive`, `usb`, `both`, `off` (see fingerprint below) |
 | `REBOOT_PROMPT` | `1` | ask before rebooting at the end |
 
 Edit them in this repo and push: every machine picks the change up on its
@@ -111,10 +112,8 @@ warns if a tunnel file is readable by other users.
   flat preset for headphones/HDMI. No GUI steps.
 - **GNOME extensions** (Dash to Dock, Blur my Shell) are installed from Fedora
   and added to `enabled-extensions`. While Fedora's Blur my Shell is older
-  than v77 (Fedora 45 ships v75, which leaves opaque squares in the rounded
-  corners of popups), the extensions.gnome.org build is also installed per
-  user and takes precedence. Caffeine is no longer installed, to save battery;
-  an existing install is left alone.
+  than v77 (v75 leaves opaque squares in the rounded corners of popups), the extensions.gnome.org build is also installed per
+  user and takes precedence.
 - **Desktop-only work** (GNOME keys, extension activation, starting the audio
   service) is queued in `~/.config/autostart` when the script runs without a
   session — e.g. over SSH or from a TTY — and applied once at your next login.
@@ -128,8 +127,8 @@ tells you when they apply and never pretends otherwise:
    reader. The PAM feature (`authselect ... with-fingerprint`) is enabled for
    you, so the first finger you enroll works for login and sudo immediately.
    `CFG_FPRINT_FIX` fixes the reader ignoring the first touch for a few
-   seconds: `keepalive` (default) keeps `fprintd` running, `usb` keeps the
-   sensor out of USB autosuspend (~0.1-0.5 W), `both`, or `off`.
+   seconds: `keepalive` (default, free) keeps `fprintd` running, `usb` keeps
+   the sensor out of USB autosuspend (costs some battery), `both`, or `off`.
 2. **Secure Boot / DKMS** (only for the separate UScreen installer's `evdi` module) —
    enrolling the DKMS signing key needs a one-time reboot and password.
 3. **BIOS sleep state** — `BIOS > Config > Power > Sleep State: Linux` enables
@@ -158,7 +157,7 @@ want it, and re-run it to update UScreen.
 
 | Symptom | Fix |
 | --- | --- |
-| `another fedora-setup run is already in progress` | wait for it, or remove `~/.local/state/fedora-setup/lock` |
+| `another fedora-setup run is already in progress` | wait for it to finish (the lock is released automatically when a run exits, even if it crashed) |
 | `Permission denied` on `./fedora-setup.sh` | `chmod +x fedora-setup.sh`, or run `bash fedora-setup.sh` |
 | A stage failed | the error names the stage; rerun just it, e.g. `fedora-setup media` |
 | Audio profile not active | `systemctl --user status easyeffects`, then `fedora-setup audio` |

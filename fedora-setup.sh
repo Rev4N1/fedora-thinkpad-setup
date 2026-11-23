@@ -31,7 +31,7 @@
 #   update     system upgrade, fwupd refresh
 #   rpmfusion  RPM Fusion free/nonfree, AppStream data, OpenH264 repo
 #   flatpak    Flathub (full repo), drop duplicate Fedora remotes
-#   amd        AMD VA-API + Vulkan freeworld drivers (skipped if not AMD)
+#   amd        AMD VA-API freeworld driver (skipped if not AMD)
 #   media      full ffmpeg, multimedia group, GStreamer codecs
 #   apps       VS Code, Helium, Spotifast, Nuvio, Discord, archive tools
 #   audio      EasyEffects, T14 Gen 1 speaker preset, service, autoload
@@ -56,7 +56,7 @@
 
 set -Eeuo pipefail
 
-VERSION="3.2"
+VERSION="3.3"
 
 # ---------------------------------------------------------------- settings ---
 
@@ -251,7 +251,7 @@ repo_enabled() {
 flatpak_installed() {
   local list
   list="$(flatpak list --app --columns=application 2>/dev/null || true)"
-  [[ $list == *"$1"* ]]
+  grep -qxF -- "$1" <<<"$list"
 }
 
 flatpak_install() {
@@ -290,7 +290,7 @@ gh_rpm() {
 
   # Lower-cased: upstream RPM names do not always match the repo's casing.
   namelist="$(rpm -qa --qf '%{NAME}\n' 2>/dev/null || true)"
-  if [[ ${namelist,,} == *"${prefix,,}"* &&"$(cat "$stamp" 2>/dev/null || true)" == "$tag" ]]; then
+  if [[ ${namelist,,} == *"${prefix,,}"* && "$(cat "$stamp" 2>/dev/null || true)" == "$tag" ]]; then
     ok "$pkg $tag is current"
     return 0
   fi
@@ -455,12 +455,6 @@ preflight() {
     fi
   fi
 
-  if (( ! DRY_RUN )); then
-    # One run at a time: two overlapping runs would fight over dnf's lock.
-    exec 9>"$STATE_DIR/lock"
-    flock -n 9 || die "another fedora-setup run is already in progress."
-  fi
-
   # The login-time 'session' stage only touches your own settings; it must not
   # ask for sudo, because it runs from autostart with no terminal to answer.
   local s needs_root=0
@@ -472,6 +466,7 @@ preflight() {
     # '|| true' + 'trap - ERR': the loop inherits the ERR trap (set -E), and
     # a single failed refresh must not print a bogus "script failed".
     ( trap - ERR
+      exec 9>&-   # do not hold the run lock after the script exits
       while true; do sudo -n true 2>/dev/null || true; sleep 60; kill -0 "$$" 2>/dev/null || exit 0; done ) &
     SUDO_KEEPALIVE=$!
     trap 'kill "$SUDO_KEEPALIVE" 2>/dev/null || true' EXIT
@@ -614,14 +609,18 @@ stage_config() {
 stage_update() {
   step "2. System + firmware update"
 
-  run sudo dnf upgrade --refresh -y
+  # A broken third-party repo or a temporary conflict must not stop the
+  # Flatpak, firmware and app updates that follow.
+  run sudo dnf upgrade --refresh -y || warn "dnf upgrade failed — see above; the sweep stage tries again"
 
   # Firmware is fetched here and installed once, in the sweep stage. Laptop
   # firmware updates are the ones that actually matter — battery, charging,
   # thermals and EC bugs all ship as fwupd payloads, and Lenovo publishes
   # ThinkPad BIOS updates to LVFS. Best-effort: some devices expose nothing.
   dnf_try fwupd
-  run_sh "sudo fwupdmgr refresh --force >/dev/null 2>&1 || true"
+  # No --force: fwupd skips a refresh that is still fresh (its own daily timer
+  # usually did it), which also respects LVFS's rate limits.
+  run_sh "sudo fwupdmgr refresh >/dev/null 2>&1 || true"
 }
 
 # ----------------------------------------------------------- 3. rpm fusion ---
@@ -634,7 +633,8 @@ stage_rpmfusion() {
   else
     run_sh 'sudo dnf install -y \
       "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm" \
-      "https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm"'
+      "https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm"' \
+      || warn "could not enable RPM Fusion — codecs and freeworld drivers will be skipped"
   fi
 
   # Since dnf5 (F41+) RPM Fusion can no longer extend Fedora's comps groups,
@@ -673,7 +673,7 @@ stage_flatpak() {
   # never orphan an app that was installed from one.
   local r scope origins
   origins="$(flatpak list --app --columns=origin 2>/dev/null || true)"
-  for r in fedora fedora-testing; do
+  for r in fedora; do
     if ! scope="$(flatpak_remote_scope "$r")"; then
       ok "remote '$r' not present"
       continue
@@ -721,48 +721,27 @@ amd_gpu() {
 }
 
 stage_amd() {
-  step "5. AMD graphics (Vulkan + VA-API)"
+  step "5. AMD graphics (VA-API hardware video decode)"
 
   if ! amd_gpu; then
-    ok "not an AMD GPU — skipping VA-API/Vulkan freeworld drivers"
+    ok "not an AMD GPU — skipping the VA-API freeworld driver"
     return 0
   fi
 
-  # mesa-vulkan-drivers is deliberately NOT in this list. It is already on a
-  # Workstation install, and after the freeworld swap below it is *replaced*
-  # by mesa-vulkan-drivers-freeworld — so asking for it by name on a re-run
-  # hits a package conflict, and dnf then satisfies the request with the i686
-  # build, dragging in ~350 MB of 32-bit libraries.
-  dnf_try vulkan-loader vulkan-tools mesa-libGLU libva-utils
+  dnf_try vulkan-tools libva-utils
 
-  # Fedora 41+ moved VA-API back into mesa-dri-drivers, so the old
-  # 'dnf swap mesa-va-drivers ...' fails: install the freeworld driver
-  # alongside instead.
+  # Hardware H.264/H.265 decode is what keeps video playback cheap on battery,
+  # and Fedora's mesa ships with those codecs disabled. Fedora 41+ moved
+  # VA-API into mesa-dri-drivers, so the freeworld driver is installed
+  # alongside, not swapped in.
   dnf_try mesa-va-drivers-freeworld
 
-  # Vulkan is still a genuine swap, per RPM Fusion's Howto/Multimedia.
-  # Three states so re-runs are safe.
-  if installed mesa-vulkan-drivers-freeworld; then
-    ok "mesa-vulkan-drivers-freeworld already installed — nothing to swap"
-  elif installed mesa-vulkan-drivers; then
-    run sudo dnf swap -y mesa-vulkan-drivers mesa-vulkan-drivers-freeworld \
-      || warn "Vulkan freeworld swap failed — this is usually a temporary mesa/RPM Fusion version mismatch; the next run retries it"
-  else
-    # Neither present (unusual) — install freeworld directly rather than
-    # pulling in the stock driver only to swap it straight back out.
-    dnf_try mesa-vulkan-drivers-freeworld
-  fi
-
-  # Guard against the 32-bit stack sneaking in via a conflict fallback.
-  if installed mesa-vulkan-drivers.i686; then
-    warn "mesa-vulkan-drivers.i686 is installed — only needed for 32-bit games or Wine."
-    warn "remove it with:  sudo dnf remove mesa-vulkan-drivers.i686 && sudo dnf autoremove"
-  fi
-
   # Deliberately omitted:
-  #   - the .i686 freeworld libraries: only needed for 32-bit Steam/Wine/Proton.
-  #   - mesa-vdpau-drivers-freeworld: VDPAU is legacy, and modern GNOME/Wayland
-  #     desktops go through VA-API.
+  #   - mesa-vulkan-drivers-freeworld: only adds Vulkan Video codecs, which
+  #     nothing on a laptop desktop uses (decode goes through VA-API), and its
+  #     exact-version pin on mesa can hold back Fedora's mesa updates.
+  #   - mesa-vdpau-drivers-freeworld: VDPAU is legacy.
+  #   - VP9/AV1: Renoir's VCN 2 decodes VP9 in hardware; AV1 it cannot at all.
 }
 
 # ---------------------------------------------------------------- 6. media ---
@@ -801,6 +780,10 @@ stage_media() {
 
   dnf_try libva libva-utils
 
+  # Bluetooth headphones: Fedora's PipeWire already does SBC, mSBC, AAC and
+  # LDAC; aptX / aptX HD (what Windows offers too) are a separate package.
+  dnf_try pipewire-codec-aptx
+
   # Cisco OpenH264 (repo enabled in stage 3) for GStreamer apps. Helium is
   # Chromium-based and brings its own codecs, so it does not need this.
   dnf_try openh264 gstreamer1-plugin-openh264
@@ -815,8 +798,11 @@ stage_apps() {
   dnf_try p7zip p7zip-plugins unrar fuse fuse-libs
 
   log "Visual Studio Code"
-  if installed code; then
-    ok "code already installed"
+  # Keyed on the repo file, not the package: without the repo 'dnf upgrade'
+  # would never update an installed code.
+  if [[ -f /etc/yum.repos.d/vscode.repo ]]; then
+    ok "VS Code repo present"
+    dnf_try code
   elif run sudo rpm --import https://packages.microsoft.com/keys/microsoft.asc; then
     write_root_file /etc/yum.repos.d/vscode.repo <<'REPO'
 [code]
@@ -932,16 +918,11 @@ JSON
 }
 
 download_irs() {
-  local data="$HOME/.local/share/easyeffects" name src local_dir
-  local_dir="$SCRIPT_DIR/linux-thinkpad-speaker-improvements-main/$SPEAKER_IRS_MODEL"
+  local data="$HOME/.local/share/easyeffects" name src
 
   for name in "${SPEAKER_IRS[@]}"; do
     if [[ -s "$data/irs/$name.irs" ]]; then
       ok "$name.irs already in place"
-      continue
-    fi
-    if [[ -s "$local_dir/$name.irs" ]]; then
-      run cp "$local_dir/$name.irs" "$data/irs/$name.irs"
       continue
     fi
     src="https://raw.githubusercontent.com/$SPEAKER_IRS_REPO/main/$SPEAKER_IRS_MODEL/$name.irs"
@@ -1078,6 +1059,10 @@ audio_session_start() {
   if [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
     return 1
   fi
+  if (( DRY_RUN )); then
+    run systemctl --user enable --now easyeffects.service
+    return 0
+  fi
   systemctl --user daemon-reload || return 1
   systemctl --user enable easyeffects.service || return 1
 
@@ -1178,7 +1163,8 @@ stage_vpn() {
     if grep -qxF -- "$name" <<<"$existing"; then
       ok "tunnel '$name' already imported"
     else
-      run sudo nmcli connection import type wireguard file "$f"
+      run sudo nmcli connection import type wireguard file "$f" \
+        || warn "could not import $f"
     fi
     # The files hold private keys: only nag when they are readable by others.
     if [[ -n "$(find "$f" -maxdepth 0 -perm /077 -print -quit 2>/dev/null)" ]]; then
@@ -1219,7 +1205,7 @@ ego_install() {
     return 0
   fi
   have gnome-shell && have gnome-extensions || return 0
-  shell="$(gnome-shell --version 2>/dev/null | grep -oE '[0-9]+' | head -n1)"
+  shell="$(gnome-shell --version 2>/dev/null | grep -oE '[0-9]+' | head -n1 || true)"
   [[ -n "$shell" ]] || { warn "could not read the GNOME Shell version"; return 0; }
   (( DRY_RUN )) && { run gnome-extensions install --force "$uuid.zip"; return 0; }
   zip="$(mktemp --suffix=.zip)"
@@ -1275,7 +1261,7 @@ gnome_extensions_update() {
 
   if [[ -n "$staged" ]]; then
     ok "extension updates downloaded — applied at your next login:"
-    printf '       %s\n' $staged
+    sed 's/^/       /' <<<"$staged"
     EXT_UPDATES_STAGED=1
   else
     ok "user extensions are current"
@@ -1316,7 +1302,7 @@ stage_gnome() {
     gnome-shell-extension-dash-to-dock \
     gnome-shell-extension-blur-my-shell
 
-  # Fedora 45 packages Blur my Shell 75, whose dynamic blur needs the separate
+  # Fedora packages Blur my Shell 75, whose dynamic blur needs the separate
   # gnome-rounded-blur library for rounded corners; without it popups such as
   # Quick Settings get opaque square blocks in their corners. 77+ draws the
   # corners itself, so until Fedora ships 77+ install the extensions.gnome.org
@@ -1416,15 +1402,7 @@ stage_laptop() {
 
   log "Power management"
   # Fedora 41+ replaced power-profiles-daemon with tuned + the tuned-ppd
-  # shim, so GNOME's power slider talks to tuned now. TLP drives the same
-  # kernel knobs and the two fight if both are running.
-  if installed tlp; then
-    warn "TLP is installed and conflicts with tuned-ppd on Fedora."
-    warn "to return to Fedora's default: sudo dnf remove tlp tlp-rdw"
-  else
-    ok "TLP not installed (good — tuned owns power management here)"
-  fi
-
+  # shim, so GNOME's power slider talks to tuned now.
   dnf_try tuned tuned-ppd
   run sudo systemctl enable --now tuned || warn "could not enable tuned"
   run_sh "tuned-adm active    || true"
@@ -1476,10 +1454,10 @@ stage_laptop() {
 
   local thr=/sys/class/power_supply/BAT0/charge_control_end_threshold
   if [[ -r $thr ]]; then
-    ok "battery charge limit: $(<"$thr")% (left at 100% by default)"
+    ok "battery charge limit: $(<"$thr")%"
     if (( FIRST_RUN )); then
-      ok "to cap later: echo 80 | sudo tee $thr"
-      ok "(that resets on reboot — it needs a systemd unit to persist)"
+      ok "to cap charging at 80% (like Lenovo Vantage's conservation mode):"
+      ok "  Settings > Power > Battery Charging > Preserve Battery Health"
     fi
   fi
 
@@ -1520,13 +1498,19 @@ stage_laptop() {
 }
 
 # fprint_fix — the reader often ignores the first touch for a few seconds.
-# Two independent causes, selected by CFG_FPRINT_FIX:
-#   keepalive  fprintd exits after ~30 s idle, so the next auth waits for the
-#              daemon to start and open the sensor. --no-timeout keeps it up;
-#              an idle fprintd costs no measurable power.
-#   usb        the Synaptics sensor (USB 06cb:*) is runtime-suspended by
-#              libfprint's hwdb and tuned. Keeping it powered removes the
-#              resume, at roughly 0.1-0.5 W while the laptop is awake.
+# Three delays stack up before the sensor is armed; a touch before that is lost:
+#   1. fprintd exits after ~30 s idle and must be D-Bus activated again.
+#   2. the Synaptics sensor (USB 06cb:*) is runtime-suspended (libfprint's
+#      hwdb enables autosuspend) and has to resume.
+#   3. fprintd opens and initialises the sensor on every Claim. Nothing
+#      short of patching libfprint removes this one.
+# CFG_FPRINT_FIX picks what to remove:
+#   keepalive  --no-timeout keeps fprintd running (fixes 1). An idle daemon
+#              does not touch the sensor, so it costs no measurable power.
+#   usb        keeps the sensor out of autosuspend (fixes 2). An awake USB
+#              device draws power all the time — tens of mW for the sensor,
+#              plus keeping its xHCI controller awake.
+# keepalive is the default: it is free. usb trades battery for a little more.
 # Files for the option that is not selected are removed, so switching the
 # setting and re-running the laptop stage is enough.
 fprint_fix() {
@@ -1538,36 +1522,8 @@ fprint_fix() {
 
   local dropin=/etc/systemd/system/fprintd.service.d/50-fedora-setup-no-timeout.conf
   local rule=/etc/udev/rules.d/99-fedora-setup-fprint-no-autosuspend.rules
-  local man_dropin=/etc/systemd/system/fprintd.service.d/override.conf
-  local man_rule=/etc/udev/rules.d/99-fprint-no-autosuspend.rules
   local rule_line='ACTION=="add|change", SUBSYSTEM=="usb", ATTR{idVendor}=="06cb", TEST=="power/control", ATTR{power/control}="on"'
   local reload_units=0 reload_udev=0 reset_usb=0
-
-  # --- hand-made versions of the same fixes (from before this setting) ---
-  # They would mask CFG_FPRINT_FIX, so remove them when they contain nothing
-  # but the fix; anything else in them is left alone with a warning.
-  local body
-  if [[ -f $man_dropin ]]; then
-    body="$(grep -v '^[[:space:]]*\(#\|$\)' "$man_dropin" 2>/dev/null || true)"
-    if [[ $body =~ ^\[Service\]$'\n'ExecStart=$'\n'ExecStart=[^$'\n']*' --no-timeout'$ ]]; then
-      warn "manual fprintd override found: $man_dropin — removing it, CFG_FPRINT_FIX manages this now"
-      run sudo rm -f "$man_dropin"
-      run sudo rmdir --ignore-fail-on-non-empty "${man_dropin%/*}" || true
-      reload_units=1
-    else
-      warn "$man_dropin has other settings too — left alone; remove its --no-timeout line by hand if present"
-    fi
-  fi
-  if [[ -f $man_rule ]]; then
-    body="$(grep -v '^[[:space:]]*\(#\|$\)' "$man_rule" 2>/dev/null || true)"
-    if [[ $body == "$rule_line" ]]; then
-      warn "manual udev rule found: $man_rule — removing it, CFG_FPRINT_FIX manages this now"
-      run sudo rm -f "$man_rule"
-      reload_udev=1 reset_usb=1
-    else
-      warn "$man_rule has other rules too — left alone"
-    fi
-  fi
 
   # --- keep fprintd running ---
   if [[ $mode == keepalive || $mode == both ]]; then
@@ -1605,7 +1561,7 @@ ExecStart=$bin --no-timeout"
   # --- keep the USB sensor powered ---
   if [[ $mode == usb || $mode == both ]]; then
     want="# Managed by fedora-setup.sh (CFG_FPRINT_FIX): keep the Synaptics fingerprint
-# sensor powered so it answers the first touch. Costs ~0.1-0.5 W while awake.
+# sensor powered so it answers the first touch. Costs some battery while awake.
 $rule_line"
     reset_usb=0
     if [[ -f $rule && "$(cat "$rule")" == "$want" ]]; then
@@ -1685,7 +1641,7 @@ stage_session() {
 
   if not_gnome; then
     ok "desktop is ${XDG_CURRENT_DESKTOP}, not GNOME — nothing to finalise"
-    rm -f "$entry"
+    run rm -f "$entry"
     return 0
   fi
 
@@ -1704,7 +1660,7 @@ stage_session() {
   fi
 
   if (( SESSION_PENDING == 0 )); then
-    rm -f "$entry" "$STATE_DIR/finish-session.sh"
+    run rm -f "$entry" "$STATE_DIR/finish-session.sh"
     ok "desktop settings and audio profile applied"
   else
     warn "some desktop steps still need a session — will retry at next login"
@@ -1712,6 +1668,11 @@ stage_session() {
 }
 
 # --------------------------------------------------------------- 13. sweep ---
+
+# Versions of the packages behind long-running services, compared before and
+# after the run's upgrades.
+service_pkgs() { rpm -q easyeffects fprintd libfprint 2>/dev/null || true; }
+PKGS_AT_START=""
 
 stage_sweep() {
   step "13. Final update sweep"
@@ -1721,7 +1682,26 @@ stage_sweep() {
   # Flathub repos — all of which can pull newer dependencies. One last pass
   # over every source guarantees the machine is genuinely current.
   log "RPM packages"
-  run sudo dnf upgrade -y   # metadata is already fresh from stage 2
+  run sudo dnf upgrade -y || warn "dnf upgrade failed — see above; the next run retries"   # metadata is fresh from stage 2
+
+  # Daemons that never exit keep running their old binary after an upgrade
+  # (fprintd does not time out when CFG_FPRINT_FIX keeps it alive). Restart
+  # the ones whose packages changed during this run; try-restart leaves a
+  # stopped service stopped.
+  if [[ "$(service_pkgs)" != "$PKGS_AT_START" ]]; then
+    run sudo systemctl try-restart fprintd.service || true
+    if [[ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
+      run systemctl --user try-restart easyeffects.service || true
+    fi
+  fi
+
+  # UScreen (separate installer) is only re-run where it is already installed:
+  # its RPM, the evdi DKMS module and the tablet APK come from GitHub, so
+  # nothing else would ever update them.
+  if installed uscreen && [[ -f "$SCRIPT_DIR/install-uscreen-fedora.sh" ]]; then
+    log "UScreen"
+    run bash "$SCRIPT_DIR/install-uscreen-fedora.sh" || warn "UScreen update failed — see above"
+  fi
 
   # System and user Flatpak installations are separate scopes and a plain
   # 'flatpak update' only covers the one you have rights to.
@@ -1811,15 +1791,21 @@ stage_health() {
 
   # Fedora uses btrfs but schedules no scrub. A monthly scrub verifies every
   # block's checksum and catches a failing SSD before it eats your files.
-  # It reads the whole disk once (a few minutes on an NVMe drive).
+  # It reads the whole disk once (a few minutes on an NVMe drive), so it only
+  # runs on mains power and at idle I/O priority; on battery it waits.
   if [[ "$(findmnt -no FSTYPE / 2>/dev/null)" == btrfs ]]; then
-    log "Btrfs scrub (monthly)"
-    local stamp="$STATE_DIR/btrfs-scrub.last" last=0 now
+    log "Btrfs scrub (monthly, on AC power)"
+    local stamp="$STATE_DIR/btrfs-scrub.last" last=0 now ac=1 f
     now="$(date +%s)"
     last="$(cat "$stamp" 2>/dev/null || echo 0)"
-    if (( now - last > 30 * 86400 )); then
+    for f in /sys/class/power_supply/A*/online; do
+      [[ -r $f ]] && ac="$(<"$f")" && break
+    done
+    if (( now - last > 30 * 86400 )) && [[ $ac != 1 ]]; then
+      ok "scrub due, but on battery — it runs on the next run on AC power"
+    elif (( now - last > 30 * 86400 )); then
       # Errors found are reported, not fatal — cleanup still has to run.
-      run_sh "sudo btrfs scrub start -B / || echo '  !! scrub reported errors — see: sudo btrfs scrub status /'"
+      run_sh "sudo ionice -c3 btrfs scrub start -B / || echo '  !! scrub reported errors — see: sudo btrfs scrub status /'"
       (( DRY_RUN )) || printf '%s\n' "$now" >"$stamp"
     else
       ok "last scrub $(( (now - last) / 86400 )) days ago — not due yet"
@@ -1882,7 +1868,7 @@ stage_cleanup() {
   run_sh "rpm -q kernel | sort -V || true"
 
   log "Orphaned dependencies"
-  run sudo dnf autoremove -y
+  run sudo dnf autoremove -y || warn "dnf autoremove failed"
 
   log "Old RPM signing keys from previous releases"
   run_sh "sudo clean-rpm-gpg-pubkey || true"
@@ -1896,12 +1882,10 @@ stage_cleanup() {
   run_sh "sudo flatpak repair || true"
 
   log "Journal trim (2 weeks / 500M)"
-  run sudo journalctl --vacuum-time=2weeks
-  run sudo journalctl --vacuum-size=500M
+  run sudo journalctl --vacuum-time=2weeks --vacuum-size=500M || true
 
   log "Saved crash dumps"
   run_sh "coredumpctl --no-pager list 2>/dev/null | tail -5 || true"
-  run_sh "sudo journalctl --vacuum-time=2weeks --identifier=systemd-coredump >/dev/null 2>&1 || true"
 
   log "Your user cache (reported, not deleted — apps rebuild these but it is your data)"
   run_sh "du -sh ~/.cache 2>/dev/null || true"
@@ -1910,7 +1894,7 @@ stage_cleanup() {
   # wiping the repo metadata too would make the next dnf command re-download
   # all of it, and this runs on every maintenance pass.
   log "Package cache"
-  run sudo dnf clean packages
+  run sudo dnf clean packages || true
 
   log "Disk usage after cleanup"
   run_sh "df -h /"
@@ -1984,7 +1968,7 @@ finish() {
 
   Post-reboot checks (all optional, they only print information):
     vainfo | grep -i h264        # AMD hardware decode
-    vulkaninfo --summary         # Vulkan freeworld driver
+    vulkaninfo --summary         # Vulkan driver
     ffmpeg -codecs | grep 264    # full ffmpeg
     tuned-adm active             # power profile
     cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_driver   # acpi-cpufreq is expected on a T14 Gen 1
@@ -2003,12 +1987,22 @@ main() {
   # No file to run from (fresh install via `bash <(curl ...)`): clone first.
   [[ -n "$SELF_PATH" ]] || bootstrap
 
+  # One run at a time, taken before self-update so two runs cannot both pull
+  # and restart. The kernel drops the lock when the process exits; the restart
+  # into a newer copy re-opens fd 9, which releases and re-takes it.
+  if (( ! DRY_RUN )); then
+    mkdir -p "$STATE_DIR"
+    exec 9>"$STATE_DIR/lock"
+    flock -n 9 || die "another fedora-setup run is already in progress."
+  fi
+
   # Pull a newer version of this script first: the same plain run then also
   # keeps the tool itself current.
   self_update
   start_log
 
   preflight
+  PKGS_AT_START="$(service_pkgs)"
 
   wants config    && stage_config
   wants update    && stage_update
