@@ -669,25 +669,19 @@ stage_flatpak() {
 
   dnf_install flatpak
 
-  # Fedora's own remotes duplicate and shadow Flathub apps. Remove them, but
-  # never orphan an app that was installed from one.
-  local r scope origins
+  # Fedora's own remote duplicates and shadows Flathub apps. Remove it, but
+  # never orphan an app that was installed from it.
+  local r=fedora scope origins
   origins="$(flatpak list --app --columns=origin 2>/dev/null || true)"
-  for r in fedora; do
-    if ! scope="$(flatpak_remote_scope "$r")"; then
-      ok "remote '$r' not present"
-      continue
-    fi
-    if grep -qx -- "$r" <<<"$origins"; then
-      warn "remote '$r' still provides installed Flatpaks — leaving it enabled"
-      continue
-    fi
-    if [[ "$scope" == system ]]; then
-      run sudo flatpak remote-delete --force --system "$r"
-    else
-      run flatpak remote-delete --force --user "$r"
-    fi
-  done
+  if ! scope="$(flatpak_remote_scope "$r")"; then
+    ok "remote '$r' not present"
+  elif grep -qx -- "$r" <<<"$origins"; then
+    warn "remote '$r' still provides installed Flatpaks — leaving it enabled"
+  elif [[ "$scope" == system ]]; then
+    run sudo flatpak remote-delete --force --system "$r"
+  else
+    run flatpak remote-delete --force --user "$r"
+  fi
 
   # The stock Fedora remote is filtered to a handful of apps. Adding Flathub
   # and clearing the filter is what actually gives you the full repository.
